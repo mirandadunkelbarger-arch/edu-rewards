@@ -8,7 +8,7 @@ import {
 import { initializeApp } from 'firebase/app';
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { 
-  getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+  getAuth, signInAnonymously, onAuthStateChanged 
 } from 'firebase/auth';
 import { 
   getFirestore, doc, setDoc, getDoc, collection, 
@@ -69,12 +69,8 @@ export default function App() {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        // Use custom token if provided (for previews), otherwise Anonymous
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
+        // Use standard anonymous auth for your local/GitHub deployment
+        await signInAnonymously(auth);
       } catch (err) {
         console.error("Auth failed:", err);
       }
