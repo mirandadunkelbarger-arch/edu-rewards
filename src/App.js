@@ -8,7 +8,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
 import { getFirestore, doc, getDoc, collection, onSnapshot, query, updateDoc, increment, addDoc, orderBy, limit } from 'firebase/firestore';
 
-const TEACHER_EMAIL = "your-actual-email@here.com"; 
+const TEACHER_EMAIL = "miranda.dunkelbarger@gmail.com"; 
 
 const firebaseConfig = {
   apiKey: "AIzaSyA5JZdbYZPbP14rBRuRvKshPvmaYB7y8R8",
