@@ -70,13 +70,14 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  // --- Auth Logic ---
-  useEffect(() => {
+  // Ensure 'async' is right here before the ()
+const initAuth = async () => { 
+  try {
     await signInAnonymously(auth);
-      } catch (err) {
-        console.error("Auth failed:", err);
-      }
-    };
+  } catch (err) {
+    console.error("Auth failed:", err);
+  }
+};
     initAuth();
 
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
