@@ -72,13 +72,7 @@ export default function App() {
 
   // --- Auth Logic ---
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
+    await signInAnonymously(auth);
       } catch (err) {
         console.error("Auth failed:", err);
       }
