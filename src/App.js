@@ -53,12 +53,13 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [isGeneratingPraise, setIsGeneratingPraise] = useState(false);
   const [customPoints, setCustomPoints] = useState(10);
+  const [redeemAmount, setRedeemAmount] = useState(10);
   const [customReason, setCustomReason] = useState('');
   
   // Modal States
   const [showAddStudent, setShowAddStudent] = useState(false);
   const [newStudentName, setNewStudentName] = useState('');
-  const [newStudentGrade, setNewStudentGrade] = useState('6th Grade');
+  const [newStudentGrade, setNewStudentGrade] = useState('Pre-K');
 
   const showToast = (msg) => {
     setToast(msg);
@@ -162,6 +163,21 @@ export default function App() {
       setCustomReason('');
     } catch (e) {
       showToast("Award failed. Check permissions.");
+    }
+  };
+
+  const handleRedeem = async () => {
+    if (!selectedStudent || !redeemAmount || !user) return;
+    try {
+      const ref = doc(db, 'users', selectedStudent.uid);
+      await updateDoc(ref, { 
+        points: increment(-Math.abs(Number(redeemAmount))) 
+      });
+      showToast(`Redeemed ${redeemAmount} points from ${selectedStudent.fullName}`);
+      setSelectedStudent(null);
+      setCustomReason('');
+    } catch (e) {
+      showToast("Redeem failed. Check permissions.");
     }
   };
 
@@ -298,46 +314,71 @@ export default function App() {
           <div className="space-y-6">
             {selectedStudent ? (
               <div className="bg-white p-10 rounded-[3.5rem] shadow-2xl border border-slate-50 sticky top-10 animate-in slide-in-from-bottom-10 duration-500">
-                <div className="flex justify-between items-center mb-10">
-                  <h3 className="text-2xl font-black tracking-tight uppercase">Reward</h3>
+                <div className="flex justify-between items-center mb-8">
+                  <h3 className="text-2xl font-black tracking-tight uppercase">Manage Points</h3>
                   <button onClick={() => setSelectedStudent(null)} className="text-slate-300 p-2 hover:bg-slate-50 rounded-full"><X size={24} /></button>
                 </div>
-                <div className="space-y-10">
-                  <div className="bg-slate-50 p-8 rounded-[2.5rem]">
-                    <div className="flex justify-between items-end mb-6">
-                      <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Amount</label>
-                      <span className="text-5xl font-black text-indigo-600">{customPoints}</span>
+
+                <div className="space-y-8">
+                  {/* Award Section */}
+                  <div>
+                    <h4 className="text-sm font-black text-indigo-400 uppercase tracking-widest mb-4 px-2">Award Points</h4>
+                    <div className="bg-indigo-50/50 p-6 rounded-[2.5rem] space-y-4">
+                      <select 
+                        value={customPoints} 
+                        onChange={(e) => setCustomPoints(e.target.value)} 
+                        className="w-full p-4 bg-white rounded-2xl border-none font-black text-2xl text-indigo-600 shadow-sm outline-none focus:ring-4 focus:ring-indigo-100 appearance-none cursor-pointer text-center"
+                      >
+                        {Array.from({length: 100}, (_, i) => i + 1).map(num => (
+                          <option key={num} value={num}>+{num} Points</option>
+                        ))}
+                      </select>
+                      
+                      <div className="relative">
+                        <textarea 
+                          rows="3" 
+                          value={customReason} 
+                          onChange={(e) => setCustomReason(e.target.value)} 
+                          placeholder="Reason for recognition..." 
+                          className="w-full p-5 bg-white rounded-[2rem] border-none text-slate-700 font-bold text-sm resize-none shadow-sm outline-none focus:ring-4 focus:ring-indigo-100" 
+                        />
+                        <button 
+                          onClick={generateAI} 
+                          disabled={isGeneratingPraise} 
+                          className="absolute right-3 bottom-3 p-3 bg-indigo-50 rounded-xl shadow-sm hover:bg-indigo-100 transition-all text-indigo-500 disabled:opacity-50"
+                        >
+                          {isGeneratingPraise ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                        </button>
+                      </div>
+                      <button 
+                        onClick={handleAward} 
+                        className="w-full bg-indigo-600 text-white py-4 rounded-[2rem] font-black text-lg hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-200 active:scale-95"
+                      >
+                        Give Points
+                      </button>
                     </div>
-                    <input 
-                      type="range" min="1" max="100" 
-                      value={customPoints} 
-                      onChange={(e) => setCustomPoints(e.target.value)} 
-                      className="w-full h-3 bg-slate-200 rounded-full appearance-none cursor-pointer accent-indigo-600" 
-                    />
                   </div>
-                  <div className="relative">
-                    <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-4 px-2">Reason</label>
-                    <textarea 
-                      rows="4" 
-                      value={customReason} 
-                      onChange={(e) => setCustomReason(e.target.value)} 
-                      placeholder="Recognize good behavior..." 
-                      className="w-full p-6 bg-slate-50 rounded-[2rem] border-none text-slate-700 font-bold text-lg resize-none shadow-inner outline-none focus:ring-2 focus:ring-indigo-400" 
-                    />
-                    <button 
-                      onClick={generateAI} 
-                      disabled={isGeneratingPraise} 
-                      className="absolute right-4 bottom-4 p-4 bg-white rounded-2xl shadow-lg hover:shadow-xl transition-all text-indigo-500 disabled:opacity-50"
-                    >
-                      {isGeneratingPraise ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
-                    </button>
+
+                  {/* Redeem Section */}
+                  <div className="pt-4 border-t border-slate-100">
+                    <h4 className="text-sm font-black text-red-400 uppercase tracking-widest mb-4 px-2">Redeem Points</h4>
+                    <div className="bg-red-50/50 p-6 rounded-[2.5rem] flex flex-col gap-4">
+                      <input 
+                        type="number" 
+                        min="1" max="1000" 
+                        value={redeemAmount} 
+                        onChange={(e) => setRedeemAmount(e.target.value)} 
+                        placeholder="Amount (1-1000)"
+                        className="w-full p-4 bg-white rounded-2xl border-none font-black text-2xl text-red-500 shadow-sm outline-none focus:ring-4 focus:ring-red-100 text-center"
+                      />
+                      <button 
+                        onClick={handleRedeem} 
+                        className="w-full bg-red-500 text-white py-4 rounded-[2rem] font-black text-lg hover:bg-red-600 transition-all shadow-xl shadow-red-200 active:scale-95"
+                      >
+                        Redeem / Subtract
+                      </button>
+                    </div>
                   </div>
-                  <button 
-                    onClick={handleAward} 
-                    className="w-full bg-indigo-600 text-white py-6 rounded-[2rem] font-black text-xl hover:bg-indigo-700 transition-all shadow-2xl shadow-indigo-200 active:scale-95"
-                  >
-                    Confirm Award
-                  </button>
                 </div>
               </div>
             ) : (
@@ -382,7 +423,7 @@ export default function App() {
                   onChange={(e) => setNewStudentGrade(e.target.value)} 
                   className="w-full p-8 bg-slate-50 rounded-[2rem] border-none font-black text-xl shadow-inner outline-none focus:ring-4 focus:ring-indigo-100 appearance-none cursor-pointer"
                 >
-                  {['6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade', '12th Grade'].map(g => (
+                  {['Pre-K', 'Kindergarten', '1st Grade', '2nd Grade', '3rd Grade', '4th Grade', '5th Grade', '6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade', '12th Grade'].map(g => (
                     <option key={g} value={g}>{g}</option>
                   ))}
                 </select>
