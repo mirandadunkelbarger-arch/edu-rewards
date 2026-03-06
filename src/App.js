@@ -1,20 +1,25 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import './index.css';
 import { 
-  ShieldCheck, Lock, LogOut, Award, Star, PlusCircle, 
-  Loader2, Users, ListFilter, Search, X, Clock, History
+  Award, Clock, Star, ShieldCheck, CheckCircle2, 
+  Search, Sparkles, Loader2, Users, UserPlus, X, AlertCircle
 } from 'lucide-react';
+
+// --- Firebase Imports ---
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDoc, collection, onSnapshot, query, updateDoc, increment, addDoc, orderBy, limit } from 'firebase/firestore';
+import { getAnalytics, isSupported } from "firebase/analytics";
+import { 
+  getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, doc, setDoc, getDoc, collection, 
+  query, onSnapshot, updateDoc, increment
+} from 'firebase/firestore';
 
-// --- APPROVED TEACHER LIST ---
-const APPROVED_TEACHERS = [
-  "miranda.dunkelbarger@gmail.com",
-  "nickdunkelbarger@gmail.com",
-  "jtselkirk85@gmail.com"
-];
-
+/**
+ * ==========================================
+ * FIREBASE CONFIGURATION (eminence-eels)
+ * ==========================================
+ */
 const firebaseConfig = {
   apiKey: "AIzaSyA5JZdbYZPbP14rBRuRvKshPvmaYB7y8R8",
   authDomain: "eminence-eels.firebaseapp.com",
@@ -25,241 +30,383 @@ const firebaseConfig = {
   measurementId: "G-G39HM9LYRZ"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
+// Analytics support check (runs only if browser supports it)
+isSupported().then(yes => yes ? getAnalytics(app) : null);
+
 export default function App() {
   const [user, setUser] = useState(null);
-  const [role, setRole] = useState(null);
-  const [students, setStudents] = useState([]);
-  const [logs, setLogs] = useState([]);
-  const [studentData, setStudentData] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
-  
-  // UI State
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [activeTab, setActiveTab] = useState('roster'); 
-  const [searchTerm, setSearchTerm] = useState('');
-  const [pointValue, setPointValue] = useState(10);
-  const [selectedList, setSelectedList] = useState('All');
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [newStudent, setNewStudent] = useState({ name: '', list: 'General' });
+  const [toast, setToast] = useState(null);
 
+  // Data States
+  const [students, setStudents] = useState([]);
+  const [activeTab, setActiveTab] = useState('students');
+  const [selectedStudent, setSelectedStudent] = useState(null);
+  
+  // UI Control States
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isGeneratingPraise, setIsGeneratingPraise] = useState(false);
+  const [customPoints, setCustomPoints] = useState(10);
+  const [customReason, setCustomReason] = useState('');
+  
+  // Modal States
+  const [showAddStudent, setShowAddStudent] = useState(false);
+  const [newStudentName, setNewStudentName] = useState('');
+  const [newStudentGrade, setNewStudentGrade] = useState('6th Grade');
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  // 1. Auth & Teacher Profile Bootstrap
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
+    const initAuth = async () => {
+      try {
+        // Use custom token if provided (for previews), otherwise Anonymous
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth failed:", err);
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
-        // FIXED: Using .includes to check the approved list
-        if (APPROVED_TEACHERS.includes(u.email)) {
-          setRole('teacher');
-        } else {
-          setRole('student');
-          const docSnap = await getDoc(doc(db, "students", u.uid));
-          if (docSnap.exists()) setStudentData(docSnap.data());
+        const userRef = doc(db, 'users', u.uid);
+        try {
+          const userSnap = await getDoc(userRef);
+          if (userSnap.exists()) {
+            setProfile(userSnap.data());
+          } else {
+            // Satisfy rules by creating your own teacher profile on first login
+            const newProfile = {
+              uid: u.uid,
+              fullName: "Admin Teacher",
+              role: "teacher",
+              createdAt: new Date().toISOString()
+            };
+            await setDoc(userRef, newProfile);
+            setProfile(newProfile);
+          }
+        } catch (err) {
+          console.error("Profile Bootstrap Error:", err);
+          showToast("Rules Error: Make sure your Firestore rules are updated!");
         }
       } else {
         setUser(null);
-        setRole(null);
+        setProfile(null);
       }
       setLoading(false);
     });
-    return () => unsub();
+    return () => unsubscribe();
   }, []);
 
+  // 2. Real-time Roster Listener (Guarded by user state)
   useEffect(() => {
-    if (!user) return;
-    
-    const qS = query(collection(db, "students"));
-    const unsubS = onSnapshot(qS, (snap) => {
-      setStudents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    if (!user || !profile) return;
+
+    const q = query(collection(db, 'users'));
+    const unsub = onSnapshot(q, (snap) => {
+      const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
+      setStudents(data.filter(u => u.role === 'student'));
+    }, (err) => {
+      console.error("Roster Sync Error:", err);
+      if (err.code === 'permission-denied') showToast("Rules Permission Denied.");
     });
 
-    const qL = query(collection(db, "logs"), orderBy("timestamp", "desc"), limit(50));
-    const unsubL = onSnapshot(qL, (snap) => {
-      setLogs(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    return () => unsub();
+  }, [user, profile]);
 
-    return () => { unsubS(); unsubL(); };
-  }, [user]);
-
-  const handleLogin = async (e) => {
+  // 3. Actions
+  const handleEnroll = async (e) => {
     e.preventDefault();
-    try { await signInWithEmailAndPassword(auth, email, password); } 
-    catch (err) { alert("Login Failed: Check credentials or Firebase Auth settings."); }
+    if (!newStudentName.trim() || !user) return;
+
+    try {
+      const newRef = doc(collection(db, 'users'));
+      await setDoc(newRef, {
+        uid: newRef.id,
+        fullName: newStudentName,
+        grade: newStudentGrade,
+        role: 'student',
+        points: 0,
+        createdAt: new Date().toISOString()
+      });
+      
+      setNewStudentName('');
+      setShowAddStudent(false);
+      showToast(`Successfully enrolled ${newStudentName}!`);
+    } catch (err) {
+      console.error("Enrollment error:", err);
+      showToast("Blocked! Ensure your profile has 'teacher' role.");
+    }
   };
 
-  const addStudent = async (e) => {
-    e.preventDefault();
-    if (!newStudent.name) return;
-    await addDoc(collection(db, "students"), {
-      fullName: newStudent.name,
-      className: newStudent.list,
-      points: 0,
-      createdAt: new Date().toISOString()
-    });
-    setNewStudent({ name: '', list: 'General' });
-    setShowAddModal(false);
+  const handleAward = async () => {
+    if (!selectedStudent || !user) return;
+    try {
+      const ref = doc(db, 'users', selectedStudent.uid);
+      await updateDoc(ref, { 
+        points: increment(Number(customPoints)) 
+      });
+      showToast(`Success! +${customPoints} to ${selectedStudent.fullName}`);
+      setSelectedStudent(null);
+      setCustomReason('');
+    } catch (e) {
+      showToast("Award failed. Check permissions.");
+    }
   };
 
-  const givePoints = async (id, name, val) => {
-    await updateDoc(doc(db, "students", id), { points: increment(Number(val)) });
-    await addDoc(collection(db, "logs"), {
-      studentId: id,
-      studentName: name,
-      amount: Number(val),
-      timestamp: new Date().toISOString(),
-      teacherEmail: user.email
-    });
+  const generateAI = async () => {
+    if (!selectedStudent) return;
+    setIsGeneratingPraise(true);
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: `One short encouraging praise for student ${selectedStudent.fullName}` }] }] })
+      });
+      const data = await res.json();
+      setCustomReason(data.candidates?.[0]?.content?.parts?.[0]?.text?.replace(/"/g, '') || "Great work today!");
+    } catch (e) {
+      setCustomReason("Doing a fantastic job in class!");
+    } finally {
+      setIsGeneratingPraise(false);
+    }
   };
 
-  const filteredStudents = useMemo(() => {
-    return students.filter(s => 
-      s.fullName.toLowerCase().includes(searchTerm.toLowerCase()) &&
-      (selectedList === 'All' || s.className === selectedList)
-    ).sort((a, b) => a.fullName.localeCompare(b.fullName));
-  }, [students, searchTerm, selectedList]);
+  const filtered = useMemo(() => {
+    return students.filter(s => s.fullName?.toLowerCase().includes(searchTerm.toLowerCase()));
+  }, [students, searchTerm]);
 
-  const classLists = ['All', ...new Set(students.map(s => s.className || 'General'))];
-
-  if (loading) return <div className="h-screen flex items-center justify-center bg-slate-50"><Loader2 className="animate-spin text-indigo-600" /></div>;
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <form onSubmit={handleLogin} className="bg-white p-10 rounded-[2.5rem] shadow-xl w-full max-w-md space-y-6 border border-slate-100">
-          <div className="text-center">
-            <ShieldCheck className="mx-auto text-indigo-600 mb-4" size={48} />
-            <h1 className="text-3xl font-black italic tracking-tighter">EELS PORTAL</h1>
-          </div>
-          <div className="space-y-4">
-            <input type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold" />
-            <input type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold" />
-            <button className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black shadow-lg">Sign In</button>
-          </div>
-        </form>
-      </div>
-    );
-  }
+  if (loading) return (
+    <div className="h-screen flex flex-col items-center justify-center bg-slate-50">
+      <Loader2 className="animate-spin text-indigo-600 mb-4" size={48} />
+      <h1 className="font-black text-slate-400 uppercase tracking-widest text-xs">Syncing School Data...</h1>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row font-sans">
-      <aside className="w-full md:w-72 bg-white border-r border-slate-200 p-8 flex flex-col space-y-8">
-        <div className="text-indigo-600 font-black text-2xl uppercase tracking-tighter flex items-center gap-2">
-          <ShieldCheck /> Console
+    <div className="min-h-screen bg-slate-50 flex font-sans text-slate-900">
+      {/* Sidebar Navigation */}
+      <aside className="w-20 md:w-72 bg-white border-r border-slate-200 flex flex-col py-10 px-6 shadow-2xl shadow-slate-200/50 z-20">
+        <div className="flex items-center gap-4 mb-12 px-2">
+          <div className="bg-indigo-600 p-3 rounded-2xl text-white shadow-lg shadow-indigo-100">
+            <ShieldCheck size={28} />
+          </div>
+          <span className="hidden md:block font-black text-2xl tracking-tighter text-indigo-950">EduRewards</span>
         </div>
         
-        {role === 'teacher' && (
-          <nav className="space-y-2">
-            <button onClick={() => setActiveTab('roster')} className={`w-full flex items-center gap-3 p-4 rounded-2xl font-bold transition-all ${activeTab === 'roster' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' : 'text-slate-500 hover:bg-slate-50'}`}>
-              <Users size={20} /> Roster
-            </button>
-            <button onClick={() => setActiveTab('history')} className={`w-full flex items-center gap-3 p-4 rounded-2xl font-bold transition-all ${activeTab === 'history' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' : 'text-slate-500 hover:bg-slate-50'}`}>
-              <History size={20} /> Audit Log
-            </button>
-          </nav>
-        )}
+        <nav className="flex-1 space-y-3">
+          <button onClick={() => setActiveTab('students')} className={`w-full flex items-center gap-4 p-4 rounded-2xl font-bold transition-all ${activeTab === 'students' ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-200' : 'text-slate-400 hover:bg-slate-50'}`}>
+            <Users size={24} /><span className="hidden md:block">Student Directory</span>
+          </button>
+        </nav>
 
-        {role === 'teacher' && activeTab === 'roster' && (
-          <div className="pt-6 border-t mt-4">
-             <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-3">Award Setting</p>
-             <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                <p className="text-2xl font-black text-indigo-600 mb-1">+{pointValue}</p>
-                <input type="range" min="1" max="100" value={pointValue} onChange={e => setPointValue(e.target.value)} className="w-full accent-indigo-600" />
-                <p className="text-[10px] text-slate-400 font-bold mt-2 italic">Points per click</p>
-             </div>
+        {/* Diagnostics Status Box */}
+        <div className="mt-auto p-5 bg-slate-50 rounded-3xl border border-slate-100">
+          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 text-center">Cloud Diagnostics</p>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase">Connection</span>
+              <div className={`w-2.5 h-2.5 rounded-full ${user ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-500'}`}></div>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase">Permissions</span>
+              <div className={`w-2.5 h-2.5 rounded-full ${profile?.role === 'teacher' ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-orange-500'}`}></div>
+            </div>
           </div>
-        )}
-        
-        <button onClick={() => signOut(auth)} className="mt-auto flex items-center gap-2 font-bold text-slate-400 hover:text-red-500"><LogOut size={20}/> Logout</button>
+          <div className="mt-4 pt-4 border-t border-slate-200 text-center">
+             <p className="text-xs font-black text-slate-700 truncate uppercase tracking-tight">{profile?.fullName || "Staff"}</p>
+          </div>
+        </div>
       </aside>
 
-      <main className="flex-1 p-8 md:p-12 overflow-y-auto">
-        {role === 'teacher' ? (
-          activeTab === 'roster' ? (
-            <div className="max-w-5xl mx-auto space-y-8">
-              <header className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                <h2 className="text-4xl font-black italic">Roster</h2>
-                <div className="flex items-center gap-4">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-3 text-slate-400" size={18} />
-                    <input value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="Search..." className="pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl outline-none font-bold" />
-                  </div>
-                  <button onClick={() => setShowAddModal(true)} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-black shadow-lg shadow-indigo-100 flex items-center gap-2">+ Enroll</button>
-                </div>
-              </header>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {filteredStudents.map(s => (
-                  <div key={s.id} className="bg-white p-6 rounded-[2rem] flex items-center justify-between border border-slate-100 shadow-sm">
-                    <div className="flex items-center gap-4">
-                      <div className="w-14 h-14 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center font-black text-xl">{s.fullName[0]}</div>
-                      <div>
-                        <h4 className="font-black text-lg">{s.fullName}</h4>
-                        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{s.className || 'General'}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <p className="text-2xl font-black text-yellow-600 flex items-center gap-1"><Star size={20} fill="currentColor"/> {s.points}</p>
-                      <button onClick={() => givePoints(s.id, s.fullName, pointValue)} className="w-12 h-12 bg-indigo-600 text-white rounded-2xl flex items-center justify-center shadow-lg hover:scale-105 active:scale-95 transition-all"><PlusCircle /></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
+      {/* Main Panel */}
+      <main className="flex-1 p-6 md:p-12 overflow-y-auto">
+        <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-12">
+          <div>
+            <h2 className="text-5xl font-black tracking-tight mb-2">Class Roster</h2>
+            <div className="flex items-center gap-2 text-slate-400 font-bold text-sm uppercase tracking-widest">
+              <Clock size={16} /> <span>Real-time Sync Active</span>
             </div>
-          ) : (
-            <div className="max-w-4xl mx-auto space-y-8">
-              <h2 className="text-4xl font-black italic">Audit Log</h2>
-              <div className="bg-white rounded-[2rem] border border-slate-200 overflow-hidden shadow-sm">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-50 border-b">
-                    <tr>
-                      <th className="p-6 font-black text-slate-400 uppercase text-xs">Student</th>
-                      <th className="p-6 font-black text-slate-400 uppercase text-xs text-center">Amount</th>
-                      <th className="p-6 font-black text-slate-400 uppercase text-xs text-right">Time</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y">
-                    {logs.map(log => (
-                      <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                        <td className="p-6 font-bold">{log.studentName}</td>
-                        <td className="p-6 text-center">
-                          <span className="bg-green-50 text-green-600 px-3 py-1 rounded-full font-black">+{log.amount}</span>
-                        </td>
-                        <td className="p-6 text-right text-slate-400 font-bold flex items-center justify-end gap-2">
-                           <Clock size={14} /> {new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )
-        ) : (
-          <div className="h-full flex flex-col items-center justify-center max-w-2xl mx-auto">
-             <div className="bg-indigo-600 w-full p-16 rounded-[4rem] text-white text-center shadow-2xl relative overflow-hidden">
-                <Award size={100} className="absolute -top-10 -right-10 opacity-10 rotate-12" />
-                <h2 className="text-4xl font-black mb-4 uppercase tracking-tight">Great job, {studentData?.fullName || 'Student'}!</h2>
-                <div className="text-[10rem] font-black leading-none my-10 tracking-tighter">{studentData?.points || 0}</div>
-                <p className="text-xl font-bold text-indigo-200 uppercase tracking-widest">Your Points Balance</p>
-             </div>
           </div>
-        )}
+          <div className="flex items-center gap-4 w-full md:w-auto">
+            <div className="relative flex-1 md:w-80">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={20} />
+              <input 
+                type="text" placeholder="Search..." 
+                value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} 
+                className="w-full pl-12 pr-6 py-4 bg-white border border-slate-200 rounded-3xl outline-none focus:ring-4 focus:ring-indigo-100 shadow-sm transition-all" 
+              />
+            </div>
+            <button 
+              onClick={() => setShowAddStudent(true)} 
+              className="bg-indigo-600 text-white p-4 rounded-2xl shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all flex items-center gap-2"
+            >
+              <UserPlus size={24} /><span className="hidden sm:block font-black">ENROLL</span>
+            </button>
+          </div>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+          {/* Student Grid */}
+          <div className="lg:col-span-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              {filtered.length > 0 ? filtered.map(student => (
+                <button 
+                  key={student.uid} 
+                  onClick={() => setSelectedStudent(student)} 
+                  className={`p-8 text-left rounded-[3rem] border-4 transition-all ${
+                    selectedStudent?.uid === student.uid 
+                    ? 'bg-white border-indigo-600 shadow-2xl scale-[1.03]' 
+                    : 'bg-white border-transparent shadow-sm hover:shadow-lg'
+                  }`}
+                >
+                  <div className="flex justify-between items-start mb-6">
+                    <div className={`w-16 h-16 rounded-3xl flex items-center justify-center font-black text-2xl ${
+                      selectedStudent?.uid === student.uid ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-300'
+                    }`}>
+                      {student.fullName?.charAt(0)}
+                    </div>
+                    <div className="flex items-center gap-1 bg-yellow-400/10 text-yellow-600 px-4 py-2 rounded-2xl text-lg font-black">
+                      <Star size={18} fill="currentColor" className="mr-1" /> {student.points || 0}
+                    </div>
+                  </div>
+                  <h4 className="text-2xl font-black text-slate-800 truncate tracking-tight">{student.fullName}</h4>
+                  <p className="text-slate-400 font-bold uppercase tracking-widest text-xs mt-1">{student.grade}</p>
+                </button>
+              )) : (
+                <div className="col-span-full py-24 text-center bg-white rounded-[4rem] border-4 border-dashed border-slate-100 text-slate-300">
+                  <AlertCircle size={48} className="mx-auto mb-4 opacity-20" />
+                  <p className="font-black text-xl uppercase tracking-widest">Roster Empty</p>
+                  <p className="mt-2 text-sm font-bold">Use the Enroll button to add students to your Firebase database.</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Action Panel */}
+          <div className="space-y-6">
+            {selectedStudent ? (
+              <div className="bg-white p-10 rounded-[3.5rem] shadow-2xl border border-slate-50 sticky top-10 animate-in slide-in-from-bottom-10 duration-500">
+                <div className="flex justify-between items-center mb-10">
+                  <h3 className="text-2xl font-black tracking-tight uppercase">Reward</h3>
+                  <button onClick={() => setSelectedStudent(null)} className="text-slate-300 p-2 hover:bg-slate-50 rounded-full"><X size={24} /></button>
+                </div>
+                <div className="space-y-10">
+                  <div className="bg-slate-50 p-8 rounded-[2.5rem]">
+                    <div className="flex justify-between items-end mb-6">
+                      <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Amount</label>
+                      <span className="text-5xl font-black text-indigo-600">{customPoints}</span>
+                    </div>
+                    <input 
+                      type="range" min="1" max="100" 
+                      value={customPoints} 
+                      onChange={(e) => setCustomPoints(e.target.value)} 
+                      className="w-full h-3 bg-slate-200 rounded-full appearance-none cursor-pointer accent-indigo-600" 
+                    />
+                  </div>
+                  <div className="relative">
+                    <label className="block text-xs font-black text-slate-400 uppercase tracking-widest mb-4 px-2">Reason</label>
+                    <textarea 
+                      rows="4" 
+                      value={customReason} 
+                      onChange={(e) => setCustomReason(e.target.value)} 
+                      placeholder="Recognize good behavior..." 
+                      className="w-full p-6 bg-slate-50 rounded-[2rem] border-none text-slate-700 font-bold text-lg resize-none shadow-inner outline-none focus:ring-2 focus:ring-indigo-400" 
+                    />
+                    <button 
+                      onClick={generateAI} 
+                      disabled={isGeneratingPraise} 
+                      className="absolute right-4 bottom-4 p-4 bg-white rounded-2xl shadow-lg hover:shadow-xl transition-all text-indigo-500 disabled:opacity-50"
+                    >
+                      {isGeneratingPraise ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
+                    </button>
+                  </div>
+                  <button 
+                    onClick={handleAward} 
+                    className="w-full bg-indigo-600 text-white py-6 rounded-[2rem] font-black text-xl hover:bg-indigo-700 transition-all shadow-2xl shadow-indigo-200 active:scale-95"
+                  >
+                    Confirm Award
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-indigo-600 p-12 rounded-[3.5rem] shadow-2xl text-white">
+                <Award size={64} className="mb-8 opacity-20" />
+                <h3 className="text-3xl font-black mb-6 tracking-tight leading-tight">Classroom Success Dashboard</h3>
+                <p className="text-indigo-100 font-bold leading-relaxed opacity-60">Enroll students and reward effort. Every update is instantly synced to your project: eminence-eels.</p>
+              </div>
+            )}
+          </div>
+        </div>
       </main>
 
-      {showAddModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-6 z-[100]">
-          <div className="bg-white w-full max-w-md rounded-[3rem] p-10 relative shadow-2xl">
-            <button onClick={() => setShowAddModal(false)} className="absolute top-8 right-8 text-slate-400 hover:text-slate-600"><X /></button>
-            <h3 className="text-3xl font-black mb-8">Enroll Student</h3>
-            <div className="space-y-4">
-              <input value={newStudent.name} onChange={e => setNewStudent({...newStudent, name: e.target.value})} placeholder="Full Name" className="w-full p-4 bg-slate-50 rounded-2xl font-bold outline-none border focus:ring-2 focus:ring-indigo-500" />
-              <input value={newStudent.list} onChange={e => setNewStudent({...newStudent, list: e.target.value})} placeholder="Class (e.g. Science 101)" className="w-full p-4 bg-slate-50 rounded-2xl font-bold outline-none border focus:ring-2 focus:ring-indigo-500" />
-              <button onClick={addStudent} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black shadow-lg hover:bg-indigo-700 transition-all">Add to Roster</button>
+      {/* Enrollment Modal */}
+      {showAddStudent && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <form 
+            onSubmit={handleEnroll} 
+            className="bg-white w-full max-w-lg rounded-[4rem] p-12 shadow-2xl animate-in zoom-in-95 duration-300"
+          >
+            <div className="flex justify-between items-center mb-10">
+              <h3 className="text-3xl font-black tracking-tight">Enroll Student</h3>
+              <button type="button" onClick={() => setShowAddStudent(false)} className="text-slate-300 hover:bg-slate-50 p-2 rounded-full">
+                <X size={32} />
+              </button>
             </div>
-          </div>
+            <div className="space-y-8">
+              <div>
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 block px-2">Student Name</label>
+                <input 
+                  required 
+                  value={newStudentName} 
+                  onChange={(e) => setNewStudentName(e.target.value)} 
+                  placeholder="Full Name..." 
+                  className="w-full p-8 bg-slate-50 rounded-[2rem] border-none font-black text-xl shadow-inner outline-none focus:ring-4 focus:ring-indigo-100" 
+                />
+              </div>
+              <div>
+                <label className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 block px-2">Grade Level</label>
+                <select 
+                  value={newStudentGrade} 
+                  onChange={(e) => setNewStudentGrade(e.target.value)} 
+                  className="w-full p-8 bg-slate-50 rounded-[2rem] border-none font-black text-xl shadow-inner outline-none focus:ring-4 focus:ring-indigo-100 appearance-none cursor-pointer"
+                >
+                  {['6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade', '12th Grade'].map(g => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
+                </select>
+              </div>
+              <button 
+                type="submit" 
+                className="w-full bg-indigo-600 text-white py-8 rounded-[2.5rem] font-black text-2xl shadow-2xl shadow-indigo-100 hover:bg-indigo-700 active:scale-95 transition-all"
+              >
+                Add to Cloud
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed bottom-12 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-10 py-6 rounded-full shadow-2xl flex items-center gap-4 animate-in slide-in-from-bottom-10 z-[150]">
+          <CheckCircle2 className="text-green-400" size={28} />
+          <span className="font-black tracking-tight text-lg">{toast}</span>
         </div>
       )}
     </div>
