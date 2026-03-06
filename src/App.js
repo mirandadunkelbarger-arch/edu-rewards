@@ -111,14 +111,12 @@ export default function App() {
 
   const handleAddStudent = async (e) => {
     e.preventDefault();
-    if (!newStudentName.trim() || !user) return;
+    if (!newStudentName.trim()) return;
     try {
-      const newStudentRef = doc(collection(db, 'users'));
-      await setDoc(newStudentRef, {
-        uid: newStudentRef.id,
+      const studentsRef = collection(db, 'students'); // Pointing to a 'students' collection
+      await setDoc(doc(studentsRef), {
         fullName: newStudentName,
         grade: newStudentGrade,
-        role: 'student',
         points: 0,
         createdAt: new Date().toISOString()
       });
@@ -126,7 +124,8 @@ export default function App() {
       setShowAddStudent(false);
       showToast(`Enrolled ${newStudentName}!`);
     } catch (err) {
-      showToast("Check Database Rules");
+      console.error("Error adding student: ", err);
+      showToast("Database Error: Check Firebase Rules");
     }
   };
 
