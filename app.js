@@ -181,7 +181,7 @@ export default function App() {
     setIsGeneratingPraise(true);
     try {
       const prompt = `Write a short praise for student ${selectedStudent.fullName} getting points for effort.`;
-      const response = await fetch(``https://generativelanguage.googleapis.com/...generateContent?key=${process.env.REACT_APP_GEMINI_API_KEY}`
+      const response = await fetch(``https://generativelanguage.googleapis.com/...generateContent?key=AIzaSyAP7VdnUIydWPtZ4TZUktZYqJWJP3hseZE`
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
@@ -401,3 +401,4 @@ export default function App() {
     </div>
   );
 }
+
