@@ -9,15 +9,14 @@ const firebaseConfig = {
   apiKey: "YOUR_API_KEY",
   authDomain: "your-project.firebaseapp.com",
   projectId: "your-project",
-  storageBucket: "your-project.appspot.com",
+  const firebaseConfig = {
+  apiKey: "AIzaSy...", // Check for the " at the end here!
+  authDomain: "your-app.firebaseapp.com",
+  projectId: "your-app",
+  storageBucket: "your-app.appspot.com",
   messagingSenderId: "123456789",
-  appId: "1:12345:web:abcde"
+  appId: "1:12345:web:6789"
 };
-
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-
-export default function App() {
   const [view, setView] = useState('teacher'); 
   const [students, setStudents] = useState([]);
   const [name, setName] = useState('');
