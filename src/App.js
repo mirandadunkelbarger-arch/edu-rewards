@@ -13,7 +13,7 @@ import {
 } from 'firebase/auth';
 import { 
   getFirestore, doc, setDoc, getDoc, collection, 
-  query, onSnapshot, updateDoc, increment, deleteDoc
+  query, onSnapshot, updateDoc, increment, deleteDoc, addDoc
 } from 'firebase/firestore';
 
 /**
@@ -50,7 +50,8 @@ export default function App() {
   // Data States
   const [students, setStudents] = useState([]);
   const [customLists, setCustomLists] = useState([]);
-  const [activeTab, setActiveTab] = useState('students'); // 'students' | 'groups'
+  const [history, setHistory] = useState([]);
+  const [activeTab, setActiveTab] = useState('students'); // 'students' | 'groups' | 'history'
   const [selectedStudent, setSelectedStudent] = useState(null);
   
   // UI Control States
@@ -137,9 +138,19 @@ export default function App() {
       setCustomLists(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
+    // History
+    const qHistory = query(collection(db, 'pointHistory'));
+    const unsubHistory = onSnapshot(qHistory, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // Sort descending by date locally
+      data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      setHistory(data);
+    });
+
     return () => {
       unsubStudents();
       unsubLists();
+      unsubHistory();
     };
   }, [user, profile]);
 
@@ -189,6 +200,19 @@ export default function App() {
     try {
       const ref = doc(db, 'users', selectedStudent.uid);
       await updateDoc(ref, { points: increment(Number(customPoints)) });
+      
+      // Log the transaction in History
+      await addDoc(collection(db, 'pointHistory'), {
+        studentId: selectedStudent.uid,
+        studentName: selectedStudent.fullName,
+        teacherId: user.uid,
+        teacherName: profile.fullName,
+        amount: Number(customPoints),
+        reason: customReason || 'Awarded points',
+        type: 'award',
+        createdAt: new Date().toISOString()
+      });
+
       showToast(`Success! +${customPoints} to ${selectedStudent.fullName}`);
       setSelectedStudent(null);
       setCustomReason('');
@@ -202,6 +226,19 @@ export default function App() {
     try {
       const ref = doc(db, 'users', selectedStudent.uid);
       await updateDoc(ref, { points: increment(-Math.abs(Number(redeemAmount))) });
+      
+      // Log the transaction in History
+      await addDoc(collection(db, 'pointHistory'), {
+        studentId: selectedStudent.uid,
+        studentName: selectedStudent.fullName,
+        teacherId: user.uid,
+        teacherName: profile.fullName,
+        amount: -Math.abs(Number(redeemAmount)),
+        reason: customReason || 'Redeemed points',
+        type: 'redeem',
+        createdAt: new Date().toISOString()
+      });
+
       showToast(`Redeemed ${redeemAmount} points from ${selectedStudent.fullName}`);
       setSelectedStudent(null);
       setCustomReason('');
@@ -313,6 +350,14 @@ export default function App() {
           >
             <ListFilter size={24} /><span className="hidden md:block">Manage Groups</span>
           </button>
+          <button 
+            onClick={() => { setActiveTab('history'); setSelectedStudent(null); }} 
+            className={`w-full flex items-center gap-4 p-4 rounded-2xl font-bold transition-all ${
+              activeTab === 'history' ? 'bg-blue-800 text-white shadow-xl shadow-blue-200' : 'text-gray-400 hover:bg-gray-50'
+            }`}
+          >
+            <Clock size={24} /><span className="hidden md:block">History</span>
+          </button>
         </nav>
 
         {/* Diagnostics Status Box */}
@@ -335,7 +380,7 @@ export default function App() {
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-12">
           <div>
             <h2 className="text-5xl font-black tracking-tight mb-2 text-blue-900">
-              {activeTab === 'students' ? 'Student Directory' : 'Group Management'}
+              {activeTab === 'students' ? 'Student Directory' : activeTab === 'groups' ? 'Group Management' : 'Point History'}
             </h2>
             <div className="flex items-center gap-2 text-red-600 font-bold text-sm uppercase tracking-widest">
               <Clock size={16} /> <span>Real-time Sync Active</span>
@@ -371,7 +416,46 @@ export default function App() {
           )}
         </header>
 
-        {activeTab === 'groups' ? (
+        {activeTab === 'history' ? (
+          /* --- HISTORY TAB --- */
+          <div className="max-w-6xl animate-in fade-in duration-300">
+            <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-gray-100">
+              <h3 className="text-2xl font-black text-blue-900 mb-6">Recent Transactions</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse min-w-[800px]">
+                  <thead>
+                    <tr className="border-b-2 border-gray-100 text-gray-400 uppercase tracking-widest text-xs">
+                      <th className="pb-4 font-black px-4">Date & Time</th>
+                      <th className="pb-4 font-black px-4">Student</th>
+                      <th className="pb-4 font-black px-4">Amount</th>
+                      <th className="pb-4 font-black px-4">Reason</th>
+                      <th className="pb-4 font-black px-4">Given By</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.length > 0 ? history.map(record => (
+                      <tr key={record.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                        <td className="py-4 px-4 font-bold text-sm text-gray-500 whitespace-nowrap">
+                          {new Date(record.createdAt).toLocaleDateString()} {new Date(record.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                        </td>
+                        <td className="py-4 px-4 font-black text-blue-900">{record.studentName}</td>
+                        <td className={`py-4 px-4 font-black ${record.amount > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                          {record.amount > 0 ? '+' : ''}{record.amount}
+                        </td>
+                        <td className="py-4 px-4 font-bold text-gray-600 max-w-xs truncate" title={record.reason}>{record.reason}</td>
+                        <td className="py-4 px-4 font-bold text-gray-400 text-sm">{record.teacherName}</td>
+                      </tr>
+                    )) : (
+                      <tr>
+                        <td colSpan="5" className="py-12 text-center text-gray-400 font-bold italic">No history recorded yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'groups' ? (
           /* --- MANAGE GROUPS TAB --- */
           <div className="max-w-4xl animate-in fade-in duration-300">
             <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-gray-100 mb-12">
@@ -568,7 +652,7 @@ export default function App() {
                             onClick={handleRedeem} 
                             className="w-full bg-red-600 text-white py-4 rounded-[2rem] font-black text-lg hover:bg-red-700 transition-all shadow-xl shadow-red-200 active:scale-95"
                           >
-                            Redeem / Subtract
+                            Redeem
                           </button>
                         </div>
                       </div>
