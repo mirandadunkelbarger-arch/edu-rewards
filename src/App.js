@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Award, Clock, Star, ShieldCheck, CheckCircle2, 
   Search, Sparkles, Loader2, Users, UserPlus, X, 
-  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, UserCheck, Mail
+  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, UserCheck, Mail, QrCode, ScanLine
 } from 'lucide-react';
 
 // --- Firebase Imports ---
@@ -86,6 +86,9 @@ export default function App() {
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const [showAddStudent, setShowAddStudent] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
+  const [scanData, setScanData] = useState('');
+  
   const [newStudentName, setNewStudentName] = useState('');
   const [newStudentGrade, setNewStudentGrade] = useState('Pre-K');
   const [newListName, setNewListName] = useState('');
@@ -496,6 +499,22 @@ export default function App() {
     setEditStudentEmail(student.email || '');
   };
 
+  const handleScanSubmit = (e) => {
+    e.preventDefault();
+    const scannedId = scanData.trim();
+    const foundStudent = students.find(s => s.uid === scannedId);
+    
+    if (foundStudent) {
+      openStudentPanel(foundStudent);
+      setShowScanner(false);
+      setScanData('');
+      showToast(`Scanned ${foundStudent.fullName}!`);
+    } else {
+      showToast("Student not found. Please try again.");
+      setScanData('');
+    }
+  };
+
   const filteredStudents = useMemo(() => {
     let base = students;
     if (activeListId !== 'all') {
@@ -721,9 +740,17 @@ export default function App() {
                   {profile.points || 0}
                </div>
              </div>
-             <div className="bg-blue-50 border border-blue-100 p-8 rounded-[2rem] text-center w-full md:w-80 shadow-inner">
-               <Award size={40} className="mx-auto text-blue-800 mb-4" />
-               <p className="font-black text-blue-900 text-lg leading-tight">Keep up the great work to earn more Eels points!</p>
+             
+             {/* Student's Personal QR Code */}
+             <div className="bg-gray-50 border border-gray-100 p-6 rounded-[2rem] flex flex-col items-center shadow-inner">
+               <img 
+                 src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${profile.uid}`} 
+                 alt="My QR Code" 
+                 className="w-32 h-32 rounded-xl mb-3 bg-white p-2 shadow-sm"
+               />
+               <p className="text-xs font-black text-gray-400 uppercase tracking-widest flex items-center gap-1">
+                 <QrCode size={14} /> Student ID
+               </p>
              </div>
           </div>
 
@@ -881,12 +908,21 @@ export default function App() {
                   className="w-full pl-12 pr-6 py-4 bg-white border border-gray-200 rounded-2xl outline-none focus:ring-4 focus:ring-blue-100 shadow-sm transition-all" 
                 />
               </div>
+              
+              <button 
+                onClick={() => setShowScanner(true)} 
+                className="bg-blue-800 text-white p-4 rounded-2xl shadow-xl shadow-blue-200 hover:bg-blue-900 transition-all flex items-center gap-2"
+                title="Scan a Student ID"
+              >
+                <ScanLine size={24} /><span className="hidden sm:block font-black">Scan</span>
+              </button>
+
               <button 
                 onClick={() => setShowAddStudent(true)} 
                 className="bg-red-600 text-white p-4 rounded-2xl shadow-xl shadow-red-200 hover:bg-red-700 transition-all flex items-center gap-2"
                 title="Add a student without an account"
               >
-                <UserPlus size={24} /><span className="hidden sm:block font-black">Offline Enroll</span>
+                <UserPlus size={24} /><span className="hidden sm:block font-black">Enroll</span>
               </button>
             </div>
           )}
@@ -1178,7 +1214,17 @@ export default function App() {
                             <p className="text-xs font-bold text-gray-400 mt-1 truncate">{selectedStudent.email}</p>
                           )}
                         </div>
-                        <button onClick={() => setSelectedStudent(null)} className="text-gray-300 hover:bg-gray-50 rounded-full p-2 flex-shrink-0"><X size={24} /></button>
+                        
+                        {/* Display QR code for Teacher to see/print */}
+                        <div className="flex-shrink-0 mr-4 hidden sm:block">
+                           <img 
+                             src={`https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${selectedStudent.uid}`} 
+                             alt="QR" 
+                             className="w-16 h-16 rounded-lg border border-gray-200 shadow-sm"
+                           />
+                        </div>
+                        
+                        <button onClick={() => setSelectedStudent(null)} className="text-gray-300 hover:bg-gray-50 rounded-full p-2 flex-shrink-0 self-start"><X size={24} /></button>
                       </>
                     )}
                   </div>
@@ -1305,6 +1351,46 @@ export default function App() {
                 Add to Roster
               </button>
             </div>
+          </form>
+        </div>
+      )}
+
+      {/* QR Scanner Modal */}
+      {showScanner && (
+        <div className="fixed inset-0 bg-blue-900/80 backdrop-blur-md z-[100] flex items-center justify-center p-4">
+          <form 
+            onSubmit={handleScanSubmit} 
+            className="bg-white w-full max-w-md rounded-[4rem] p-12 shadow-2xl animate-in zoom-in-95 duration-300 text-center relative"
+          >
+            <button 
+              type="button" 
+              onClick={() => setShowScanner(false)} 
+              className="absolute top-8 right-8 text-gray-300 hover:bg-gray-50 p-2 rounded-full"
+            >
+              <X size={28} />
+            </button>
+            
+            <div className="bg-blue-50 w-24 h-24 rounded-full flex items-center justify-center mx-auto mb-6">
+              <ScanLine size={48} className="text-blue-800 animate-pulse" />
+            </div>
+            
+            <h3 className="text-3xl font-black tracking-tight text-blue-900 mb-2">Ready to Scan</h3>
+            <p className="text-sm font-bold text-gray-500 mb-8">
+              Point your hardware scanner at a student's ID card or device screen.
+            </p>
+            
+            <input 
+              autoFocus
+              type="text" 
+              value={scanData} 
+              onChange={(e) => setScanData(e.target.value)} 
+              placeholder="Waiting for scanner input..." 
+              className="w-full p-6 bg-gray-50 rounded-[2rem] border-2 border-dashed border-gray-300 font-black text-center text-blue-900 outline-none focus:border-blue-500 focus:bg-white transition-all" 
+            />
+            
+            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mt-6">
+              *Scanner must be configured to press "Enter" after reading.
+            </p>
           </form>
         </div>
       )}
