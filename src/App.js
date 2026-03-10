@@ -2,14 +2,15 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Award, Clock, Star, ShieldCheck, CheckCircle2, 
   Search, Sparkles, Loader2, Users, UserPlus, X, 
-  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, GraduationCap, Briefcase
+  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut
 } from 'lucide-react';
 
 // --- Firebase Imports ---
 import { initializeApp } from 'firebase/app';
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { 
-  getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, signOut 
 } from 'firebase/auth';
 import { 
   getFirestore, doc, setDoc, getDoc, collection, 
@@ -42,24 +43,27 @@ isSupported().then(yes => yes ? getAnalytics(app) : null);
 const GRADES = ['Pre-K', 'Kindergarten', '1st Grade', '2nd Grade', '3rd Grade', '4th Grade', '5th Grade', '6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade', '12th Grade'];
 
 export default function App() {
-  // App Mode State: 'loading' | 'roleSelection' | 'teacher' | 'studentLogin' | 'studentView'
-  const [appMode, setAppMode] = useState('loading');
-  
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
 
-  // Data States
+  // --- Auth Screen States ---
+  const [authView, setAuthView] = useState('login'); // 'login' | 'signup'
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [signupName, setSignupName] = useState('');
+  const [signupRole, setSignupRole] = useState('student'); // 'student' | 'teacher'
+  const [signupGrade, setSignupGrade] = useState('6th Grade');
+
+  // --- Data States ---
   const [students, setStudents] = useState([]);
   const [customLists, setCustomLists] = useState([]);
   const [history, setHistory] = useState([]);
   const [activeTab, setActiveTab] = useState('students');
   
-  // Selection States
+  // --- Teacher UI States ---
   const [selectedStudent, setSelectedStudent] = useState(null);
-  const [activeStudentId, setActiveStudentId] = useState(null);
-
-  // UI Control States
   const [searchTerm, setSearchTerm] = useState('');
   const [activeListId, setActiveListId] = useState('all');
   const [isGeneratingPraise, setIsGeneratingPraise] = useState(false);
@@ -67,12 +71,10 @@ export default function App() {
   const [redeemAmount, setRedeemAmount] = useState(10);
   const [customReason, setCustomReason] = useState('');
   
-  // Edit Student States
   const [isEditingStudent, setIsEditingStudent] = useState(false);
   const [editStudentName, setEditStudentName] = useState('');
   const [editStudentGrade, setEditStudentGrade] = useState('');
 
-  // Modal / Group States
   const [showAddStudent, setShowAddStudent] = useState(false);
   const [newStudentName, setNewStudentName] = useState('');
   const [newStudentGrade, setNewStudentGrade] = useState('Pre-K');
@@ -84,74 +86,42 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  // 1. Auth & Device Routing
+  // 1. Core Authentication Listener
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) {
-        console.error("Auth failed:", err);
-      }
-    };
-    initAuth();
-
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
-        const userRef = doc(db, 'users', u.uid);
         try {
-          const userSnap = await getDoc(userRef);
-          
-          if (userSnap.exists() && userSnap.data().role === 'teacher') {
-            // Found a teacher profile
+          const userSnap = await getDoc(doc(db, 'users', u.uid));
+          if (userSnap.exists()) {
             setProfile(userSnap.data());
-            setAppMode('teacher');
-          } else {
-            // No teacher profile. Check if this device is linked to a student
-            const savedStudentId = localStorage.getItem('edurewards_student_id');
-            if (savedStudentId) {
-              setActiveStudentId(savedStudentId);
-              setAppMode('studentView');
-            } else {
-              // Brand new device, show welcome screen
-              setAppMode('roleSelection');
-            }
           }
         } catch (err) {
-          console.error("Profile check error:", err);
+          console.error("Failed to fetch profile:", err);
         }
       } else {
         setUser(null);
         setProfile(null);
       }
+      setLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
-  // 2. Real-time Listeners
+  // 2. Real-time Listeners (Only runs if user is logged in and profile exists)
   useEffect(() => {
-    if (!user) return;
+    if (!user || !profile) return;
 
-    // Students
-    const qStudents = query(collection(db, 'users'));
-    const unsubStudents = onSnapshot(qStudents, (snap) => {
+    const unsubStudents = onSnapshot(query(collection(db, 'users')), (snap) => {
       const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
       setStudents(data.filter(u => u.role === 'student'));
     });
 
-    // Custom Lists
-    const qLists = query(collection(db, 'customLists'));
-    const unsubLists = onSnapshot(qLists, (snap) => {
+    const unsubLists = onSnapshot(query(collection(db, 'customLists')), (snap) => {
       setCustomLists(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    // History
-    const qHistory = query(collection(db, 'pointHistory'));
-    const unsubHistory = onSnapshot(qHistory, (snap) => {
+    const unsubHistory = onSnapshot(query(collection(db, 'pointHistory')), (snap) => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       setHistory(data);
@@ -162,47 +132,68 @@ export default function App() {
       unsubLists();
       unsubHistory();
     };
-  }, [user]);
+  }, [user, profile]);
 
-  // --- DEVICE SETUP ACTIONS ---
+  // --- AUTHENTICATION ACTIONS ---
   
-  const handleTeacherSetup = async () => {
-    if (!user) return;
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoading(true);
     try {
-      const userRef = doc(db, 'users', user.uid);
-      const newProfile = {
-        uid: user.uid,
-        fullName: "Classroom Teacher",
-        role: "teacher",
-        createdAt: new Date().toISOString()
-      };
-      await setDoc(userRef, newProfile);
-      setProfile(newProfile);
-      setAppMode('teacher');
-      showToast("Teacher Dashboard Initialized!");
+      await signInWithEmailAndPassword(auth, email, password);
+      showToast("Welcome back!");
     } catch (err) {
-      showToast("Setup failed. Check database rules.");
+      showToast(err.message.includes('auth/') ? "Invalid email or password." : err.message);
+      setLoading(false);
     }
   };
 
-  const handleStudentDeviceLink = (studentId) => {
-    localStorage.setItem('edurewards_student_id', studentId);
-    setActiveStudentId(studentId);
-    setAppMode('studentView');
-    setSearchTerm('');
+  const handleSignup = async (e) => {
+    e.preventDefault();
+    if (!signupName.trim()) {
+      showToast("Please enter your name.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      
+      const newProfile = {
+        uid: userCredential.user.uid,
+        email: email,
+        fullName: signupName,
+        role: signupRole,
+        createdAt: new Date().toISOString()
+      };
+
+      if (signupRole === 'student') {
+        newProfile.grade = signupGrade;
+        newProfile.points = 0;
+      }
+
+      await setDoc(doc(db, 'users', userCredential.user.uid), newProfile);
+      setProfile(newProfile);
+      showToast("Account created successfully!");
+    } catch (err) {
+      showToast(err.message.includes('email-already') ? "Email already exists." : "Signup failed.");
+      setLoading(false);
+    }
   };
 
-  const handleStudentLogout = () => {
-    localStorage.removeItem('edurewards_student_id');
-    setActiveStudentId(null);
-    setAppMode('roleSelection');
+  const handleLogout = async () => {
+    await signOut(auth);
+    setEmail('');
+    setPassword('');
+    setAuthView('login');
   };
 
   // --- TEACHER ACTIONS ---
-  const handleEnroll = async (e) => {
+  
+  const handleEnrollOfflineStudent = async (e) => {
     e.preventDefault();
     if (!newStudentName.trim() || !user) return;
     try {
+      // Creates an offline record for tracking
       const newRef = doc(collection(db, 'users'));
       await setDoc(newRef, {
         uid: newRef.id,
@@ -210,13 +201,14 @@ export default function App() {
         grade: newStudentGrade,
         role: 'student',
         points: 0,
+        isOffline: true, // Marker to indicate no auth account attached
         createdAt: new Date().toISOString()
       });
       setNewStudentName('');
       setShowAddStudent(false);
-      showToast(`Successfully enrolled ${newStudentName}!`);
+      showToast(`Enrolled offline student ${newStudentName}!`);
     } catch (err) {
-      showToast("Blocked! Ensure your profile has 'teacher' role.");
+      showToast("Blocked! Check your permissions.");
     }
   };
 
@@ -353,105 +345,132 @@ export default function App() {
     return base.filter(s => s.fullName?.toLowerCase().includes(searchTerm.toLowerCase()));
   }, [students, customLists, activeListId, searchTerm]);
 
-  // Derived state for Student View
-  const activeStudentData = students.find(s => s.uid === activeStudentId);
-  const myHistory = history.filter(h => h.studentId === activeStudentId);
 
   // ==========================================
   // RENDER BLOCKS
   // ==========================================
 
-  if (appMode === 'loading') {
+  if (loading) {
     return (
       <div className="h-screen flex flex-col items-center justify-center bg-gray-50">
         <Loader2 className="animate-spin text-blue-800 mb-4" size={48} />
-        <h1 className="font-black text-gray-400 uppercase tracking-widest text-xs">Starting Eminence Eels...</h1>
+        <h1 className="font-black text-gray-400 uppercase tracking-widest text-xs">Loading Eminence Eels...</h1>
       </div>
     );
   }
 
   // ----------------------------------------
-  // APP MODE: ROLE SELECTION (FIRST OPEN)
+  // AUTHENTICATION SCREEN
   // ----------------------------------------
-  if (appMode === 'roleSelection') {
+  if (!user || !profile) {
     return (
-      <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 text-white font-sans">
-        <ShieldCheck size={72} className="mb-6 text-red-500" strokeWidth={2.5} />
-        <h1 className="text-5xl md:text-6xl font-black mb-4 text-center tracking-tighter">Welcome to Eels</h1>
-        <p className="text-blue-200 font-bold tracking-widest uppercase text-sm md:text-base mb-12 text-center">Reward System & Tracker</p>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
-          <button 
-            onClick={handleTeacherSetup}
-            className="bg-white text-blue-900 p-10 rounded-[3rem] shadow-2xl hover:scale-105 hover:shadow-blue-900/50 transition-all group flex flex-col items-center text-center"
-          >
-            <div className="bg-blue-50 p-6 rounded-full mb-6 group-hover:bg-blue-100 transition-colors">
-              <Briefcase size={48} className="text-blue-800" />
-            </div>
-            <h2 className="text-2xl font-black tracking-tight mb-2">I'm a Teacher</h2>
-            <p className="text-gray-500 font-bold text-sm">Manage roster and award points</p>
-          </button>
+      <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 font-sans relative overflow-hidden">
+        {/* Decorative Background Elements */}
+        <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-red-600 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-blue-500 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
 
-          <button 
-            onClick={() => setAppMode('studentLogin')}
-            className="bg-red-600 text-white p-10 rounded-[3rem] shadow-2xl hover:scale-105 hover:shadow-red-900/50 transition-all group flex flex-col items-center text-center border-4 border-red-500 hover:bg-red-500"
-          >
-            <div className="bg-red-700/50 p-6 rounded-full mb-6 group-hover:bg-red-400/50 transition-colors">
-              <GraduationCap size={48} className="text-white" />
-            </div>
-            <h2 className="text-2xl font-black tracking-tight mb-2">I'm a Student</h2>
-            <p className="text-red-200 font-bold text-sm">Check my rewards and history</p>
-          </button>
+        <div className="flex flex-col items-center mb-8 relative z-10">
+          <ShieldCheck size={64} className="text-red-500 mb-4" strokeWidth={2.5} />
+          <h1 className="text-5xl font-black text-white tracking-tighter">Eminence Eels</h1>
+          <p className="text-blue-200 font-bold uppercase tracking-[0.2em] text-xs mt-2">Classroom Rewards Portal</p>
         </div>
-      </div>
-    );
-  }
 
-  // ----------------------------------------
-  // APP MODE: STUDENT LOGIN
-  // ----------------------------------------
-  if (appMode === 'studentLogin') {
-    return (
-      <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 text-white font-sans">
-        <ShieldCheck size={72} className="mb-6 text-red-500" strokeWidth={2.5} />
-        <h1 className="text-5xl font-black mb-2 text-center tracking-tighter">Student Login</h1>
-        <p className="text-blue-200 font-bold tracking-widest uppercase text-sm mb-12">Find your name to access your portal</p>
-        
-        <div className="bg-white rounded-[3rem] p-8 w-full max-w-lg shadow-2xl">
-          <div className="relative mb-6">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-            <input 
-              type="text" placeholder="Search for your name..." 
-              value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} 
-              className="w-full pl-12 pr-4 py-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-4 focus:ring-blue-100 font-bold text-gray-700" 
-            />
-          </div>
+        <div className="bg-white rounded-[3rem] p-10 w-full max-w-md shadow-2xl relative z-10">
+          <h2 className="text-3xl font-black text-blue-900 mb-8 tracking-tight text-center">
+            {authView === 'login' ? 'Welcome Back' : 'Create Account'}
+          </h2>
 
-          <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
-            {filteredStudents.length > 0 ? filteredStudents.map(s => (
-              <button 
-                key={s.uid} 
-                onClick={() => handleStudentDeviceLink(s.uid)} 
-                className="w-full p-5 bg-gray-50 rounded-2xl text-left hover:bg-blue-50 transition-all border-2 border-transparent hover:border-blue-200 group flex justify-between items-center"
-              >
+          <form onSubmit={authView === 'login' ? handleLogin : handleSignup} className="space-y-6">
+            
+            {authView === 'signup' && (
+              <div className="space-y-6 animate-in fade-in slide-in-from-top-4 duration-300">
                 <div>
-                  <span className="block font-black text-xl text-blue-900 group-hover:text-blue-700">{s.fullName}</span>
-                  <span className="block text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">{s.grade}</span>
+                  <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">I am a...</label>
+                  <div className="flex gap-2 p-1 bg-gray-100 rounded-[1.5rem]">
+                    <button 
+                      type="button" 
+                      onClick={() => setSignupRole('student')}
+                      className={`flex-1 py-3 rounded-2xl font-black text-sm transition-all ${signupRole === 'student' ? 'bg-white text-blue-900 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                    >
+                      Student
+                    </button>
+                    <button 
+                      type="button" 
+                      onClick={() => setSignupRole('teacher')}
+                      className={`flex-1 py-3 rounded-2xl font-black text-sm transition-all ${signupRole === 'teacher' ? 'bg-white text-blue-900 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                    >
+                      Teacher
+                    </button>
+                  </div>
                 </div>
-                <ChevronRight className="text-gray-300 group-hover:text-blue-600" />
-              </button>
-            )) : (
-              <p className="text-center text-gray-400 font-bold py-8">No student found with that name.</p>
+
+                <div>
+                  <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">Full Name</label>
+                  <input 
+                    required type="text" placeholder="John Doe"
+                    value={signupName} onChange={(e) => setSignupName(e.target.value)} 
+                    className="w-full p-5 bg-gray-50 rounded-3xl border-none font-bold text-blue-900 shadow-inner outline-none focus:ring-4 focus:ring-blue-100" 
+                  />
+                </div>
+
+                {signupRole === 'student' && (
+                  <div>
+                    <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">Grade</label>
+                    <select 
+                      value={signupGrade} onChange={(e) => setSignupGrade(e.target.value)} 
+                      className="w-full p-5 bg-gray-50 rounded-3xl border-none font-bold text-blue-900 shadow-inner outline-none focus:ring-4 focus:ring-blue-100 appearance-none cursor-pointer"
+                    >
+                      {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
+                    </select>
+                  </div>
+                )}
+              </div>
             )}
+
+            <div>
+              <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">Email Address</label>
+              <input 
+                required type="email" placeholder="email@school.edu"
+                value={email} onChange={(e) => setEmail(e.target.value)} 
+                className="w-full p-5 bg-gray-50 rounded-3xl border-none font-bold text-blue-900 shadow-inner outline-none focus:ring-4 focus:ring-blue-100" 
+              />
+            </div>
+            
+            <div>
+              <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">Password</label>
+              <input 
+                required type="password" placeholder="••••••••" minLength={6}
+                value={password} onChange={(e) => setPassword(e.target.value)} 
+                className="w-full p-5 bg-gray-50 rounded-3xl border-none font-bold text-blue-900 shadow-inner outline-none focus:ring-4 focus:ring-blue-100" 
+              />
+            </div>
+
+            <button 
+              type="submit" 
+              className="w-full bg-red-600 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl shadow-red-200 hover:bg-red-700 active:scale-95 transition-all mt-4"
+            >
+              {authView === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+          </form>
+
+          <div className="mt-8 text-center">
+            <button 
+              type="button"
+              onClick={() => setAuthView(authView === 'login' ? 'signup' : 'login')}
+              className="text-sm font-bold text-gray-400 hover:text-blue-800 transition-colors"
+            >
+              {authView === 'login' ? "Don't have an account? Sign Up" : "Already have an account? Log In"}
+            </button>
           </div>
         </div>
 
-        <button 
-          onClick={() => setAppMode('roleSelection')} 
-          className="mt-12 text-blue-300 hover:text-white font-black tracking-widest uppercase text-xs flex items-center gap-2 transition-colors"
-        >
-          <LogOut size={16} /> Go Back
-        </button>
+        {/* Toast */}
+        {toast && (
+          <div className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-blue-900 text-white px-8 py-4 rounded-full shadow-2xl flex items-center gap-3 animate-in slide-in-from-bottom-8 z-50">
+            <AlertCircle size={20} className="text-red-400" />
+            <span className="font-bold text-sm">{toast}</span>
+          </div>
+        )}
       </div>
     );
   }
@@ -459,7 +478,10 @@ export default function App() {
   // ----------------------------------------
   // APP MODE: STUDENT DASHBOARD
   // ----------------------------------------
-  if (appMode === 'studentView' && activeStudentData) {
+  if (profile.role === 'student') {
+    // Only show history matching the logged-in student
+    const myHistory = history.filter(h => h.studentId === profile.uid);
+
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
         <header className="bg-blue-900 text-white p-6 md:p-10 flex justify-between items-center rounded-b-[3rem] shadow-xl relative z-20">
@@ -467,14 +489,14 @@ export default function App() {
             <ShieldCheck size={48} className="text-red-500" />
             <div>
               <h1 className="text-3xl font-black tracking-tighter">Student Portal</h1>
-              <p className="text-blue-200 font-bold text-sm uppercase tracking-widest">{activeStudentData.fullName}</p>
+              <p className="text-blue-200 font-bold text-sm uppercase tracking-widest">{profile.fullName}</p>
             </div>
           </div>
           <button 
-            onClick={handleStudentLogout} 
+            onClick={handleLogout} 
             className="bg-blue-800 text-blue-100 p-4 rounded-2xl hover:bg-red-600 hover:text-white transition-all flex items-center gap-2 font-bold shadow-inner"
           >
-             <span className="hidden sm:block">Log Out</span>
+             <span className="hidden sm:block">Sign Out</span>
              <LogOut size={20} />
           </button>
         </header>
@@ -486,7 +508,7 @@ export default function App() {
                <h2 className="text-gray-400 font-black uppercase tracking-widest mb-2 text-center md:text-left">My Reward Balance</h2>
                <div className="text-8xl font-black text-blue-900 flex items-center justify-center md:justify-start gap-4 tracking-tighter">
                   <Star size={72} className="text-red-600" fill="currentColor" />
-                  {activeStudentData.points || 0}
+                  {profile.points || 0}
                </div>
              </div>
              <div className="bg-blue-50 border border-blue-100 p-8 rounded-[2rem] text-center w-full md:w-80 shadow-inner">
@@ -538,16 +560,6 @@ export default function App() {
     );
   }
 
-  // Fallback for Student View if data hasn't loaded
-  if (appMode === 'studentView' && !activeStudentData) {
-    return (
-       <div className="h-screen flex flex-col items-center justify-center bg-gray-50">
-        <Loader2 className="animate-spin text-blue-800 mb-4" size={48} />
-        <h1 className="font-black text-gray-400 uppercase tracking-widest text-xs">Loading Your Profile...</h1>
-      </div>
-    )
-  }
-
   // ----------------------------------------
   // APP MODE: TEACHER DASHBOARD
   // ----------------------------------------
@@ -556,10 +568,10 @@ export default function App() {
       {/* Sidebar Navigation */}
       <aside className="w-20 md:w-72 bg-white border-r border-gray-200 flex flex-col py-10 px-6 shadow-2xl shadow-gray-200/50 z-20">
         <div className="flex items-center gap-4 mb-12 px-2">
-          <div className="bg-blue-800 p-3 rounded-2xl text-white shadow-lg shadow-blue-200">
+          <div className="bg-blue-800 p-3 rounded-2xl text-white shadow-lg shadow-blue-200 flex-shrink-0">
             <ShieldCheck size={28} />
           </div>
-          <span className="hidden md:block font-black text-2xl tracking-tighter text-blue-900">Eminence Eels</span>
+          <span className="hidden md:block font-black text-2xl tracking-tighter text-blue-900 truncate">Eminence Eels</span>
         </div>
         
         <nav className="flex-1 space-y-3">
@@ -589,19 +601,24 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Diagnostics Status Box */}
-        <div className="mt-auto p-5 bg-gray-50 rounded-3xl border border-gray-100 hidden md:block">
-          <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 text-center">System Status</p>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-bold text-gray-500 uppercase">Cloud</span>
-              <div className={`w-2.5 h-2.5 rounded-full ${user ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-500'}`}></div>
-            </div>
+        {/* User Badge & Logout */}
+        <div className="mt-auto hidden md:block">
+          <div className="p-5 bg-blue-50 rounded-3xl border border-blue-100 text-center mb-4">
+             <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">Signed in as</p>
+             <p className="text-sm font-black text-blue-900 truncate tracking-tight">{profile.fullName}</p>
           </div>
-          <div className="mt-4 pt-4 border-t border-gray-200 text-center">
-             <p className="text-xs font-black text-blue-900 truncate uppercase tracking-tight">{profile?.fullName || "Staff"}</p>
-          </div>
+          <button 
+            onClick={handleLogout}
+            className="w-full flex items-center justify-center gap-3 p-4 bg-white border-2 border-gray-200 text-gray-500 rounded-2xl font-bold hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all"
+          >
+            <LogOut size={18} /> Sign Out
+          </button>
         </div>
+
+        {/* Mobile logout */}
+        <button onClick={handleLogout} className="md:hidden mt-auto p-4 mx-auto text-gray-400 hover:text-red-600">
+          <LogOut size={24} />
+        </button>
       </aside>
 
       {/* Main Panel */}
@@ -638,8 +655,9 @@ export default function App() {
               <button 
                 onClick={() => setShowAddStudent(true)} 
                 className="bg-red-600 text-white p-4 rounded-2xl shadow-xl shadow-red-200 hover:bg-red-700 transition-all flex items-center gap-2"
+                title="Add a student without an account"
               >
-                <UserPlus size={24} /><span className="hidden sm:block font-black">ENROLL</span>
+                <UserPlus size={24} /><span className="hidden sm:block font-black">Offline Enroll</span>
               </button>
             </div>
           )}
@@ -760,19 +778,22 @@ export default function App() {
                   <button 
                     key={student.uid} 
                     onClick={() => openStudentPanel(student)} 
-                    className={`p-8 text-left rounded-[3rem] border-4 transition-all ${
+                    className={`p-8 text-left rounded-[3rem] border-4 transition-all relative overflow-hidden ${
                       selectedStudent?.uid === student.uid 
                       ? 'bg-white border-blue-800 shadow-2xl scale-[1.03]' 
                       : 'bg-white border-transparent shadow-sm hover:shadow-lg'
                     }`}
                   >
+                    {!student.email && (
+                      <span className="absolute top-4 right-4 text-[10px] font-black text-gray-300 uppercase tracking-widest bg-gray-50 px-2 py-1 rounded-md">Offline Profile</span>
+                    )}
                     <div className="flex justify-between items-start mb-6">
                       <div className={`w-16 h-16 rounded-3xl flex items-center justify-center font-black text-2xl ${
                         selectedStudent?.uid === student.uid ? 'bg-blue-800 text-white' : 'bg-gray-100 text-gray-400'
                       }`}>
                         {student.fullName?.charAt(0)}
                       </div>
-                      <div className="flex items-center gap-1 bg-gray-50 border border-gray-100 px-4 py-2 rounded-2xl text-lg font-black text-blue-900">
+                      <div className="flex items-center gap-1 bg-gray-50 border border-gray-100 px-4 py-2 rounded-2xl text-lg font-black text-blue-900 mt-2">
                         <Star size={18} className="text-red-600" fill="currentColor" /> {student.points || 0}
                       </div>
                     </div>
@@ -783,7 +804,7 @@ export default function App() {
                   <div className="col-span-full py-24 text-center bg-white rounded-[4rem] border-4 border-dashed border-gray-200 text-gray-400">
                     <AlertCircle size={48} className="mx-auto mb-4 opacity-20" />
                     <p className="font-black text-xl uppercase tracking-widest">Roster Empty</p>
-                    <p className="mt-2 text-sm font-bold">Use the Enroll button to add students.</p>
+                    <p className="mt-2 text-sm font-bold">Students will appear here when they register.</p>
                   </div>
                 )}
               </div>
@@ -904,19 +925,22 @@ export default function App() {
         )}
       </main>
 
-      {/* Enrollment Modal */}
+      {/* Offline Enrollment Modal */}
       {showAddStudent && (
         <div className="fixed inset-0 bg-blue-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
           <form 
-            onSubmit={handleEnroll} 
+            onSubmit={handleEnrollOfflineStudent} 
             className="bg-white w-full max-w-lg rounded-[4rem] p-12 shadow-2xl animate-in zoom-in-95 duration-300"
           >
-            <div className="flex justify-between items-center mb-10">
-              <h3 className="text-3xl font-black tracking-tight text-blue-900">Enroll Student</h3>
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-3xl font-black tracking-tight text-blue-900">Add Offline Student</h3>
               <button type="button" onClick={() => setShowAddStudent(false)} className="text-gray-300 hover:bg-gray-50 p-2 rounded-full">
                 <X size={32} />
               </button>
             </div>
+            <p className="text-sm font-bold text-gray-500 mb-10 leading-relaxed">
+              Use this to add a student who won't be logging in on their own device. You can still track and award them points!
+            </p>
             <div className="space-y-8">
               <div>
                 <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">Student Name</label>
