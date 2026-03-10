@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Award, Clock, Star, ShieldCheck, CheckCircle2, 
   Search, Sparkles, Loader2, Users, UserPlus, X, 
-  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, UserCheck
+  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, UserCheck, Mail
 } from 'lucide-react';
 
 // --- Firebase Imports ---
@@ -38,7 +38,6 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 
 // OPTIMIZATION: Enable Offline Persistence & Local Caching
-// This saves thousands of database reads by using the browser's local memory first.
 const db = initializeFirestore(app, {
   localCache: persistentLocalCache({tabManager: persistentMultipleTabManager()})
 });
@@ -64,12 +63,13 @@ export default function App() {
 
   // --- Data States ---
   const [students, setStudents] = useState([]);
-  const [pendingTeachers, setPendingTeachers] = useState([]);
+  const [pendingUsers, setPendingUsers] = useState([]); // Both pending teachers and students
+  const [adminInvites, setAdminInvites] = useState([]);
   const [customLists, setCustomLists] = useState([]);
   const [history, setHistory] = useState([]);
   const [activeTab, setActiveTab] = useState('students'); // 'students' | 'groups' | 'history' | 'admin'
   
-  // --- Teacher UI States ---
+  // --- UI States ---
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [activeListId, setActiveListId] = useState('all');
@@ -77,10 +77,12 @@ export default function App() {
   const [customPoints, setCustomPoints] = useState(10);
   const [redeemAmount, setRedeemAmount] = useState(10);
   const [customReason, setCustomReason] = useState('');
+  const [inviteEmail, setInviteEmail] = useState('');
   
   const [isEditingStudent, setIsEditingStudent] = useState(false);
   const [editStudentName, setEditStudentName] = useState('');
   const [editStudentGrade, setEditStudentGrade] = useState('');
+  const [editStudentEmail, setEditStudentEmail] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const [showAddStudent, setShowAddStudent] = useState(false);
@@ -104,18 +106,19 @@ export default function App() {
           if (userSnap.exists()) {
             const userData = userSnap.data();
             
-            // --- AUTO-UPGRADE FIX ---
-            // If your account exists but isn't an admin yet, this forces the upgrade
-            if (u.email?.toLowerCase() === 'miranda.dunkelbarger@gmail.com' && userData.role !== 'admin') {
+            // Hardcoded fallback safety for original admins
+            const adminEmails = ['miranda.dunkelbarger@gmail.com', 'jtselkirk85@gmail.com'];
+            if (u.email && adminEmails.includes(u.email.toLowerCase()) && userData.role !== 'admin') {
               userData.role = 'admin';
               await updateDoc(doc(db, 'users', u.uid), { role: 'admin' });
             }
             
             setProfile(userData);
           } else {
-            // Fallback profile creation if document was missed
+            // Failsafe for missing documents
             let fallbackRole = 'pending_teacher';
-            if (u.email?.toLowerCase() === 'miranda.dunkelbarger@gmail.com') {
+            const adminEmails = ['miranda.dunkelbarger@gmail.com', 'jtselkirk85@gmail.com'];
+            if (u.email && adminEmails.includes(u.email.toLowerCase())) {
               fallbackRole = 'admin';
             }
             const fallbackProfile = {
@@ -140,29 +143,32 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Real-time Listeners (Optimized for Scale & Billing)
+  // 2. Real-time Listeners
   useEffect(() => {
     if (!user || !profile) return;
 
     let unsubStudents = () => {};
     let unsubLists = () => {};
     let unsubHistory = () => {};
+    let unsubInvites = () => {};
 
     if (profile.role === 'student') {
-      // STUDENTS: Only download their own history to save database reads
+      // STUDENTS: Only download their own history
       const qHistory = query(collection(db, 'pointHistory'), where('studentId', '==', profile.uid));
       unsubHistory = onSnapshot(qHistory, (snap) => {
         const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        setHistory(data.slice(0, 50)); // Keep only 50 most recent locally
+        setHistory(data.slice(0, 50)); 
       });
-    } else {
+    } else if (profile.role === 'teacher' || profile.role === 'admin') {
       // TEACHERS & ADMINS: Fetch roster and lists
       unsubStudents = onSnapshot(query(collection(db, 'users')), (snap) => {
         const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
         setStudents(data.filter(u => u.role === 'student'));
+        
         if (profile.role === 'admin') {
-          setPendingTeachers(data.filter(u => u.role === 'pending_teacher'));
+          // Admins also need to see pending users
+          setPendingUsers(data.filter(u => u.role === 'pending_teacher' || u.role === 'pending_student'));
         }
       });
 
@@ -170,17 +176,23 @@ export default function App() {
         setCustomLists(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       });
 
-      // Limit history to 100 recent transactions globally to prevent massive downloads
       const qHistory = query(collection(db, 'pointHistory'), orderBy('createdAt', 'desc'), limit(100));
       unsubHistory = onSnapshot(qHistory, (snap) => {
         setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       });
+
+      if (profile.role === 'admin') {
+        unsubInvites = onSnapshot(query(collection(db, 'admin_invites')), (snap) => {
+           setAdminInvites(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        });
+      }
     }
 
     return () => {
       unsubStudents();
       unsubLists();
       unsubHistory();
+      unsubInvites();
     };
   }, [user, profile]);
 
@@ -209,11 +221,20 @@ export default function App() {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       
       // Determine Role securely
-      let finalRole = signupRole;
-      if (email.toLowerCase() === 'miranda.dunkelbarger@gmail.com') {
-        finalRole = 'admin'; // Auto-verify the main admin
-      } else if (signupRole === 'teacher') {
-        finalRole = 'pending_teacher'; // Requires admin approval
+      let finalRole = signupRole === 'teacher' ? 'pending_teacher' : 'pending_student';
+      const adminEmails = ['miranda.dunkelbarger@gmail.com', 'jtselkirk85@gmail.com'];
+      
+      // 1. Check hardcoded admins
+      // 2. Check if email is in the admin_invites collection
+      const inviteRef = doc(db, 'admin_invites', email.toLowerCase());
+      const inviteSnap = await getDoc(inviteRef);
+
+      if (adminEmails.includes(email.toLowerCase()) || inviteSnap.exists()) {
+        finalRole = 'admin'; 
+        // Consume/delete the invite so it can't be reused
+        if (inviteSnap.exists()) {
+          await deleteDoc(inviteRef);
+        }
       }
 
       const newProfile = {
@@ -224,14 +245,14 @@ export default function App() {
         createdAt: new Date().toISOString()
       };
 
-      if (signupRole === 'student') {
+      if (finalRole === 'pending_student' || signupRole === 'student') {
         newProfile.grade = signupGrade;
         newProfile.points = 0;
       }
 
       await setDoc(doc(db, 'users', userCredential.user.uid), newProfile);
       setProfile(newProfile);
-      showToast("Account created successfully!");
+      showToast(finalRole === 'admin' ? "Admin Account Created!" : "Account created. Awaiting approval!");
     } catch (err) {
       showToast(err.message.includes('email-already') ? "Email already exists." : "Signup failed.");
       setLoading(false);
@@ -264,21 +285,47 @@ export default function App() {
   };
 
   // --- ADMIN ACTIONS ---
-  const handleApproveTeacher = async (teacherId) => {
+  const handleApproveUser = async (uid, currentRole) => {
     try {
-      await updateDoc(doc(db, 'users', teacherId), { role: 'teacher' });
-      showToast("Teacher approved!");
+      const newRole = currentRole === 'pending_teacher' ? 'teacher' : 'student';
+      await updateDoc(doc(db, 'users', uid), { role: newRole });
+      showToast("User approved!");
     } catch (err) {
-      showToast("Failed to approve teacher. Check your Admin permissions.");
+      showToast("Failed to approve. Check your Admin permissions.");
     }
   };
 
-  const handleRejectTeacher = async (teacherId) => {
+  const handleRejectUser = async (uid) => {
     try {
-      await deleteDoc(doc(db, 'users', teacherId));
-      showToast("Teacher request removed.");
+      await deleteDoc(doc(db, 'users', uid));
+      showToast("Request removed.");
     } catch (err) {
       showToast("Failed to remove request.");
+    }
+  };
+
+  const handleSendAdminInvite = async (e) => {
+    e.preventDefault();
+    if (!inviteEmail.trim()) return;
+    try {
+      await setDoc(doc(db, 'admin_invites', inviteEmail.toLowerCase()), {
+        email: inviteEmail.toLowerCase(),
+        invitedBy: profile.fullName,
+        createdAt: new Date().toISOString()
+      });
+      setInviteEmail('');
+      showToast(`Admin invite created for ${inviteEmail}`);
+    } catch (err) {
+      showToast("Failed to create invite.");
+    }
+  };
+
+  const handleRemoveInvite = async (emailId) => {
+    try {
+      await deleteDoc(doc(db, 'admin_invites', emailId));
+      showToast("Invite revoked.");
+    } catch (err) {
+      showToast("Failed to revoke invite.");
     }
   };
 
@@ -309,11 +356,18 @@ export default function App() {
     if (!selectedStudent || !editStudentName.trim()) return;
     try {
       const ref = doc(db, 'users', selectedStudent.uid);
-      await updateDoc(ref, {
+      const updates = {
         fullName: editStudentName,
         grade: editStudentGrade
-      });
-      setSelectedStudent(prev => ({...prev, fullName: editStudentName, grade: editStudentGrade}));
+      };
+      
+      // Only admins can update the email field in Firestore
+      if (profile.role === 'admin') {
+        updates.email = editStudentEmail;
+      }
+
+      await updateDoc(ref, updates);
+      setSelectedStudent(prev => ({...prev, ...updates}));
       setIsEditingStudent(false);
       showToast("Student profile updated!");
     } catch (e) {
@@ -402,7 +456,6 @@ export default function App() {
     }
   };
 
-  // --- LIST MANAGEMENT ACTIONS ---
   const handleCreateList = async () => {
     if (!newListName.trim() || newListStudentIds.length === 0) {
       showToast("Enter a name and select at least one student.");
@@ -440,6 +493,7 @@ export default function App() {
     setIsEditingStudent(false);
     setEditStudentName(student.fullName);
     setEditStudentGrade(student.grade || 'Pre-K');
+    setEditStudentEmail(student.email || '');
   };
 
   const filteredStudents = useMemo(() => {
@@ -611,16 +665,16 @@ export default function App() {
   }
 
   // ----------------------------------------
-  // PENDING TEACHER SCREEN
+  // PENDING USER SCREEN (Student or Teacher)
   // ----------------------------------------
-  if (profile.role === 'pending_teacher') {
+  if (profile.role === 'pending_teacher' || profile.role === 'pending_student') {
     return (
       <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 font-sans relative overflow-hidden">
         <div className="bg-white rounded-[3rem] p-10 w-full max-w-md shadow-2xl relative z-10 text-center">
            <Clock size={64} className="mx-auto text-blue-800 mb-6" />
            <h2 className="text-3xl font-black text-blue-900 mb-4 tracking-tight">Approval Pending</h2>
            <p className="text-gray-500 font-bold mb-8 leading-relaxed">
-             Your teacher account has been successfully created and is waiting for administrator approval. Please check back later.
+             Your account has been created and is waiting for an administrator to verify it. Please check back soon.
            </p>
            <button 
               onClick={handleLogout} 
@@ -637,7 +691,6 @@ export default function App() {
   // APP MODE: STUDENT DASHBOARD
   // ----------------------------------------
   if (profile.role === 'student') {
-    // Only show history matching the logged-in student
     const myHistory = history.filter(h => h.studentId === profile.uid);
 
     return (
@@ -660,7 +713,6 @@ export default function App() {
         </header>
 
         <main className="flex-1 p-6 md:p-12 max-w-5xl mx-auto w-full space-y-10 -mt-6 relative z-10">
-          {/* Points Card */}
           <div className="bg-white rounded-[3rem] p-10 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-8 border-t-8 border-red-600">
              <div>
                <h2 className="text-gray-400 font-black uppercase tracking-widest mb-2 text-center md:text-left">My Reward Balance</h2>
@@ -675,7 +727,6 @@ export default function App() {
              </div>
           </div>
 
-          {/* Student History Table */}
           <div className="bg-white rounded-[3rem] p-10 shadow-xl border border-gray-100">
              <h3 className="text-2xl font-black text-blue-900 mb-8 flex items-center gap-3">
                 <Clock className="text-red-500" /> My Activity History
@@ -766,10 +817,10 @@ export default function App() {
               }`}
             >
               <UserCheck size={24} />
-              <span className="hidden md:block">
-                Verify Staff 
-                {pendingTeachers.length > 0 && <span className="ml-2 bg-red-100 text-red-700 px-2 py-1 rounded-full text-xs">{pendingTeachers.length}</span>}
+              <span className="hidden md:block flex-1 text-left">
+                Admin Settings 
               </span>
+              {pendingUsers.length > 0 && <span className="hidden md:block bg-red-100 text-red-700 px-2 py-1 rounded-full text-xs font-black">{pendingUsers.length}</span>}
             </button>
           )}
         </nav>
@@ -804,7 +855,7 @@ export default function App() {
               {activeTab === 'students' ? 'Student Directory' 
                : activeTab === 'groups' ? 'Group Management' 
                : activeTab === 'history' ? 'Transaction Log' 
-               : 'Staff Verification'}
+               : 'Admin Dashboard'}
             </h2>
             <div className="flex items-center gap-2 text-red-600 font-bold text-sm uppercase tracking-widest">
               <Clock size={16} /> <span>Real-time Sync Active</span>
@@ -843,26 +894,71 @@ export default function App() {
 
         {activeTab === 'admin' ? (
           /* --- ADMIN TAB --- */
-          <div className="max-w-4xl animate-in fade-in duration-300">
+          <div className="max-w-4xl animate-in fade-in duration-300 space-y-12">
+            
+            {/* Invite Admin Section */}
             <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-gray-100">
-              <h3 className="text-2xl font-black text-blue-900 mb-6">Pending Approvals</h3>
-              {pendingTeachers.length > 0 ? (
+              <h3 className="text-2xl font-black text-blue-900 mb-2">Invite Administrator</h3>
+              <p className="text-sm font-bold text-gray-400 mb-6">Authorize an email address to automatically become an Admin when they sign up.</p>
+              
+              <form onSubmit={handleSendAdminInvite} className="flex flex-col md:flex-row gap-4 mb-8">
+                <div className="relative flex-1">
+                  <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-blue-300" size={20} />
+                  <input 
+                    required type="email"
+                    className="w-full pl-12 pr-6 py-4 rounded-2xl border-2 border-gray-100 bg-gray-50 focus:bg-white focus:border-blue-800 outline-none font-bold text-lg transition-all"
+                    placeholder="colleague@school.edu"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                  />
+                </div>
+                <button type="submit" className="bg-blue-800 text-white px-8 py-4 rounded-2xl font-black shadow-lg hover:bg-blue-900 transition-all whitespace-nowrap">
+                  Send Invite
+                </button>
+              </form>
+
+              {adminInvites.length > 0 && (
+                <div>
+                  <p className="text-xs font-black text-gray-400 uppercase tracking-widest mb-3">Pending Invites</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {adminInvites.map(invite => (
+                      <div key={invite.id} className="flex items-center justify-between bg-blue-50 p-4 rounded-2xl border border-blue-100">
+                        <span className="font-bold text-blue-900 text-sm truncate pr-4">{invite.email}</span>
+                        <button onClick={() => handleRemoveInvite(invite.id)} className="text-red-500 hover:text-red-700 bg-white p-2 rounded-xl shadow-sm">
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Pending Approvals Section */}
+            <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-gray-100">
+              <h3 className="text-2xl font-black text-blue-900 mb-6">Pending User Approvals</h3>
+              {pendingUsers.length > 0 ? (
                 <div className="space-y-4">
-                  {pendingTeachers.map(pt => (
+                  {pendingUsers.map(pt => (
                     <div key={pt.uid} className="flex flex-col md:flex-row justify-between items-start md:items-center bg-gray-50 p-6 rounded-3xl border border-gray-100 gap-4">
                       <div>
-                        <p className="font-black text-blue-900 text-xl">{pt.fullName}</p>
+                        <div className="flex items-center gap-3 mb-1">
+                          <p className="font-black text-blue-900 text-xl">{pt.fullName}</p>
+                          <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md ${pt.role === 'pending_teacher' ? 'bg-blue-100 text-blue-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                            {pt.role === 'pending_teacher' ? 'Teacher' : 'Student'}
+                          </span>
+                        </div>
                         <p className="text-sm font-bold text-gray-500">{pt.email}</p>
                       </div>
                       <div className="flex gap-3 w-full md:w-auto">
                         <button 
-                          onClick={() => handleApproveTeacher(pt.uid)} 
+                          onClick={() => handleApproveUser(pt.uid, pt.role)} 
                           className="flex-1 bg-green-500 hover:bg-green-600 text-white px-6 py-3 rounded-xl font-black shadow-md transition-all"
                         >
                           Approve
                         </button>
                         <button 
-                          onClick={() => handleRejectTeacher(pt.uid)} 
+                          onClick={() => handleRejectUser(pt.uid)} 
                           className="flex-1 bg-red-100 hover:bg-red-200 text-red-600 px-6 py-3 rounded-xl font-black transition-all"
                         >
                           Reject
@@ -874,7 +970,7 @@ export default function App() {
               ) : (
                  <div className="py-16 text-center bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
                     <CheckCircle2 size={48} className="mx-auto text-green-400 mb-4 opacity-50" />
-                    <p className="text-gray-500 font-bold text-lg">No pending teacher requests.</p>
+                    <p className="text-gray-500 font-bold text-lg">No pending user requests.</p>
                  </div>
               )}
             </div>
@@ -1001,7 +1097,7 @@ export default function App() {
                     }`}
                   >
                     {student.isOffline && (
-                      <span className="absolute top-4 right-4 text-[10px] font-black text-gray-300 uppercase tracking-widest bg-gray-50 px-2 py-1 rounded-md">Offline Profile</span>
+                      <span className="absolute top-4 right-4 text-[10px] font-black text-gray-300 uppercase tracking-widest bg-gray-50 px-2 py-1 rounded-md">Offline</span>
                     )}
                     <div className="flex justify-between items-start mb-6">
                       <div className={`w-16 h-16 rounded-3xl flex items-center justify-center font-black text-2xl ${
@@ -1036,8 +1132,19 @@ export default function App() {
                         <h3 className="text-lg font-black tracking-tight text-blue-900 uppercase mb-4">Edit Profile</h3>
                         <input 
                           value={editStudentName} onChange={(e) => setEditStudentName(e.target.value)} 
+                          placeholder="Student Name"
                           className="w-full p-4 mb-3 bg-gray-50 rounded-2xl border-none font-bold text-blue-900 outline-none focus:ring-2 focus:ring-blue-200"
                         />
+                        {profile.role === 'admin' && !selectedStudent.isOffline && (
+                          <div className="mb-3">
+                            <input 
+                              value={editStudentEmail} onChange={(e) => setEditStudentEmail(e.target.value)} 
+                              placeholder="Contact Email"
+                              className="w-full p-4 bg-gray-50 rounded-2xl border-none font-bold text-blue-900 outline-none focus:ring-2 focus:ring-blue-200"
+                            />
+                            <p className="text-[10px] text-gray-400 font-bold mt-1 px-2 uppercase tracking-widest">* Updates database email, not login credentials</p>
+                          </div>
+                        )}
                         <select 
                           value={editStudentGrade} onChange={(e) => setEditStudentGrade(e.target.value)} 
                           className="w-full p-4 mb-4 bg-gray-50 rounded-2xl border-none font-bold text-blue-900 outline-none focus:ring-2 focus:ring-blue-200"
@@ -1059,16 +1166,19 @@ export default function App() {
                       </div>
                     ) : (
                       <>
-                        <div>
-                          <h3 className="text-2xl font-black tracking-tight text-blue-900 leading-tight">{selectedStudent.fullName}</h3>
+                        <div className="flex-1 truncate pr-4">
+                          <h3 className="text-2xl font-black tracking-tight text-blue-900 leading-tight truncate">{selectedStudent.fullName}</h3>
                           <div className="flex items-center gap-2 mt-1">
-                            <span className="text-sm font-bold text-gray-400 uppercase tracking-widest">{selectedStudent.grade}</span>
-                            <button onClick={() => setIsEditingStudent(true)} className="text-blue-800 hover:text-blue-600 p-1" title="Edit Student">
+                            <span className="text-sm font-bold text-gray-400 uppercase tracking-widest truncate">{selectedStudent.grade}</span>
+                            <button onClick={() => setIsEditingStudent(true)} className="text-blue-800 hover:text-blue-600 p-1 flex-shrink-0" title="Edit Student">
                               <Edit2 size={14} />
                             </button>
                           </div>
+                          {profile.role === 'admin' && selectedStudent.email && (
+                            <p className="text-xs font-bold text-gray-400 mt-1 truncate">{selectedStudent.email}</p>
+                          )}
                         </div>
-                        <button onClick={() => setSelectedStudent(null)} className="text-gray-300 hover:bg-gray-50 rounded-full p-2"><X size={24} /></button>
+                        <button onClick={() => setSelectedStudent(null)} className="text-gray-300 hover:bg-gray-50 rounded-full p-2 flex-shrink-0"><X size={24} /></button>
                       </>
                     )}
                   </div>
