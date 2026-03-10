@@ -95,7 +95,16 @@ export default function App() {
         try {
           const userSnap = await getDoc(doc(db, 'users', u.uid));
           if (userSnap.exists()) {
-            setProfile(userSnap.data());
+            const userData = userSnap.data();
+            
+            // --- AUTO-UPGRADE FIX ---
+            // If your account exists but isn't an admin yet, this forces the upgrade
+            if (u.email?.toLowerCase() === 'miranda.dunkelbarger@gmail.com' && userData.role !== 'admin') {
+              userData.role = 'admin';
+              await updateDoc(doc(db, 'users', u.uid), { role: 'admin' });
+            }
+            
+            setProfile(userData);
           } else {
             // Fallback profile creation if document was missed
             let fallbackRole = 'pending_teacher';
