@@ -2,14 +2,14 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Award, Clock, Star, ShieldCheck, CheckCircle2, 
   Search, Sparkles, Loader2, Users, UserPlus, X, 
-  AlertCircle, Edit2, Save, Trash2, ListFilter
+  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, GraduationCap, Briefcase
 } from 'lucide-react';
 
 // --- Firebase Imports ---
 import { initializeApp } from 'firebase/app';
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { 
-  getAuth, signInAnonymously, onAuthStateChanged 
+  getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken
 } from 'firebase/auth';
 import { 
   getFirestore, doc, setDoc, getDoc, collection, 
@@ -42,18 +42,23 @@ isSupported().then(yes => yes ? getAnalytics(app) : null);
 const GRADES = ['Pre-K', 'Kindergarten', '1st Grade', '2nd Grade', '3rd Grade', '4th Grade', '5th Grade', '6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade', '12th Grade'];
 
 export default function App() {
+  // App Mode State: 'loading' | 'roleSelection' | 'teacher' | 'studentLogin' | 'studentView'
+  const [appMode, setAppMode] = useState('loading');
+  
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
 
   // Data States
   const [students, setStudents] = useState([]);
   const [customLists, setCustomLists] = useState([]);
   const [history, setHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState('students'); // 'students' | 'groups' | 'history'
-  const [selectedStudent, setSelectedStudent] = useState(null);
+  const [activeTab, setActiveTab] = useState('students');
   
+  // Selection States
+  const [selectedStudent, setSelectedStudent] = useState(null);
+  const [activeStudentId, setActiveStudentId] = useState(null);
+
   // UI Control States
   const [searchTerm, setSearchTerm] = useState('');
   const [activeListId, setActiveListId] = useState('all');
@@ -79,11 +84,15 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  // 1. Auth & Teacher Profile Bootstrap
+  // 1. Auth & Device Routing
   useEffect(() => {
     const initAuth = async () => {
       try {
-        await signInAnonymously(auth);
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
       } catch (err) {
         console.error("Auth failed:", err);
       }
@@ -96,34 +105,36 @@ export default function App() {
         const userRef = doc(db, 'users', u.uid);
         try {
           const userSnap = await getDoc(userRef);
-          if (userSnap.exists()) {
+          
+          if (userSnap.exists() && userSnap.data().role === 'teacher') {
+            // Found a teacher profile
             setProfile(userSnap.data());
+            setAppMode('teacher');
           } else {
-            const newProfile = {
-              uid: u.uid,
-              fullName: "Admin Teacher",
-              role: "teacher",
-              createdAt: new Date().toISOString()
-            };
-            await setDoc(userRef, newProfile);
-            setProfile(newProfile);
+            // No teacher profile. Check if this device is linked to a student
+            const savedStudentId = localStorage.getItem('edurewards_student_id');
+            if (savedStudentId) {
+              setActiveStudentId(savedStudentId);
+              setAppMode('studentView');
+            } else {
+              // Brand new device, show welcome screen
+              setAppMode('roleSelection');
+            }
           }
         } catch (err) {
-          console.error("Profile Bootstrap Error:", err);
-          showToast("Rules Error: Make sure your Firestore rules are updated!");
+          console.error("Profile check error:", err);
         }
       } else {
         setUser(null);
         setProfile(null);
       }
-      setLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
   // 2. Real-time Listeners
   useEffect(() => {
-    if (!user || !profile) return;
+    if (!user) return;
 
     // Students
     const qStudents = query(collection(db, 'users'));
@@ -142,7 +153,6 @@ export default function App() {
     const qHistory = query(collection(db, 'pointHistory'));
     const unsubHistory = onSnapshot(qHistory, (snap) => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      // Sort descending by date locally
       data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       setHistory(data);
     });
@@ -152,13 +162,46 @@ export default function App() {
       unsubLists();
       unsubHistory();
     };
-  }, [user, profile]);
+  }, [user]);
 
-  // 3. Actions - Students
+  // --- DEVICE SETUP ACTIONS ---
+  
+  const handleTeacherSetup = async () => {
+    if (!user) return;
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      const newProfile = {
+        uid: user.uid,
+        fullName: "Classroom Teacher",
+        role: "teacher",
+        createdAt: new Date().toISOString()
+      };
+      await setDoc(userRef, newProfile);
+      setProfile(newProfile);
+      setAppMode('teacher');
+      showToast("Teacher Dashboard Initialized!");
+    } catch (err) {
+      showToast("Setup failed. Check database rules.");
+    }
+  };
+
+  const handleStudentDeviceLink = (studentId) => {
+    localStorage.setItem('edurewards_student_id', studentId);
+    setActiveStudentId(studentId);
+    setAppMode('studentView');
+    setSearchTerm('');
+  };
+
+  const handleStudentLogout = () => {
+    localStorage.removeItem('edurewards_student_id');
+    setActiveStudentId(null);
+    setAppMode('roleSelection');
+  };
+
+  // --- TEACHER ACTIONS ---
   const handleEnroll = async (e) => {
     e.preventDefault();
     if (!newStudentName.trim() || !user) return;
-
     try {
       const newRef = doc(collection(db, 'users'));
       await setDoc(newRef, {
@@ -169,7 +212,6 @@ export default function App() {
         points: 0,
         createdAt: new Date().toISOString()
       });
-      
       setNewStudentName('');
       setShowAddStudent(false);
       showToast(`Successfully enrolled ${newStudentName}!`);
@@ -186,7 +228,6 @@ export default function App() {
         fullName: editStudentName,
         grade: editStudentGrade
       });
-      // Update local selection to reflect changes immediately
       setSelectedStudent(prev => ({...prev, fullName: editStudentName, grade: editStudentGrade}));
       setIsEditingStudent(false);
       showToast("Student profile updated!");
@@ -201,7 +242,6 @@ export default function App() {
       const ref = doc(db, 'users', selectedStudent.uid);
       await updateDoc(ref, { points: increment(Number(customPoints)) });
       
-      // Log the transaction in History
       await addDoc(collection(db, 'pointHistory'), {
         studentId: selectedStudent.uid,
         studentName: selectedStudent.fullName,
@@ -227,7 +267,6 @@ export default function App() {
       const ref = doc(db, 'users', selectedStudent.uid);
       await updateDoc(ref, { points: increment(-Math.abs(Number(redeemAmount))) });
       
-      // Log the transaction in History
       await addDoc(collection(db, 'pointHistory'), {
         studentId: selectedStudent.uid,
         studentName: selectedStudent.fullName,
@@ -265,7 +304,7 @@ export default function App() {
     }
   };
 
-  // 4. Actions - Custom Lists
+  // --- LIST MANAGEMENT ACTIONS ---
   const handleCreateList = async () => {
     if (!newListName.trim() || newListStudentIds.length === 0) {
       showToast("Enter a name and select at least one student.");
@@ -298,7 +337,6 @@ export default function App() {
     }
   };
 
-  // Select student handler (resets edit state)
   const openStudentPanel = (student) => {
     setSelectedStudent(student);
     setIsEditingStudent(false);
@@ -315,13 +353,204 @@ export default function App() {
     return base.filter(s => s.fullName?.toLowerCase().includes(searchTerm.toLowerCase()));
   }, [students, customLists, activeListId, searchTerm]);
 
-  if (loading) return (
-    <div className="h-screen flex flex-col items-center justify-center bg-gray-50">
-      <Loader2 className="animate-spin text-blue-800 mb-4" size={48} />
-      <h1 className="font-black text-gray-400 uppercase tracking-widest text-xs">Syncing Eels Data...</h1>
-    </div>
-  );
+  // Derived state for Student View
+  const activeStudentData = students.find(s => s.uid === activeStudentId);
+  const myHistory = history.filter(h => h.studentId === activeStudentId);
 
+  // ==========================================
+  // RENDER BLOCKS
+  // ==========================================
+
+  if (appMode === 'loading') {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-gray-50">
+        <Loader2 className="animate-spin text-blue-800 mb-4" size={48} />
+        <h1 className="font-black text-gray-400 uppercase tracking-widest text-xs">Starting Eminence Eels...</h1>
+      </div>
+    );
+  }
+
+  // ----------------------------------------
+  // APP MODE: ROLE SELECTION (FIRST OPEN)
+  // ----------------------------------------
+  if (appMode === 'roleSelection') {
+    return (
+      <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 text-white font-sans">
+        <ShieldCheck size={72} className="mb-6 text-red-500" strokeWidth={2.5} />
+        <h1 className="text-5xl md:text-6xl font-black mb-4 text-center tracking-tighter">Welcome to Eels</h1>
+        <p className="text-blue-200 font-bold tracking-widest uppercase text-sm md:text-base mb-12 text-center">Reward System & Tracker</p>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+          <button 
+            onClick={handleTeacherSetup}
+            className="bg-white text-blue-900 p-10 rounded-[3rem] shadow-2xl hover:scale-105 hover:shadow-blue-900/50 transition-all group flex flex-col items-center text-center"
+          >
+            <div className="bg-blue-50 p-6 rounded-full mb-6 group-hover:bg-blue-100 transition-colors">
+              <Briefcase size={48} className="text-blue-800" />
+            </div>
+            <h2 className="text-2xl font-black tracking-tight mb-2">I'm a Teacher</h2>
+            <p className="text-gray-500 font-bold text-sm">Manage roster and award points</p>
+          </button>
+
+          <button 
+            onClick={() => setAppMode('studentLogin')}
+            className="bg-red-600 text-white p-10 rounded-[3rem] shadow-2xl hover:scale-105 hover:shadow-red-900/50 transition-all group flex flex-col items-center text-center border-4 border-red-500 hover:bg-red-500"
+          >
+            <div className="bg-red-700/50 p-6 rounded-full mb-6 group-hover:bg-red-400/50 transition-colors">
+              <GraduationCap size={48} className="text-white" />
+            </div>
+            <h2 className="text-2xl font-black tracking-tight mb-2">I'm a Student</h2>
+            <p className="text-red-200 font-bold text-sm">Check my rewards and history</p>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ----------------------------------------
+  // APP MODE: STUDENT LOGIN
+  // ----------------------------------------
+  if (appMode === 'studentLogin') {
+    return (
+      <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 text-white font-sans">
+        <ShieldCheck size={72} className="mb-6 text-red-500" strokeWidth={2.5} />
+        <h1 className="text-5xl font-black mb-2 text-center tracking-tighter">Student Login</h1>
+        <p className="text-blue-200 font-bold tracking-widest uppercase text-sm mb-12">Find your name to access your portal</p>
+        
+        <div className="bg-white rounded-[3rem] p-8 w-full max-w-lg shadow-2xl">
+          <div className="relative mb-6">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+            <input 
+              type="text" placeholder="Search for your name..." 
+              value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} 
+              className="w-full pl-12 pr-4 py-4 bg-gray-50 border-none rounded-2xl outline-none focus:ring-4 focus:ring-blue-100 font-bold text-gray-700" 
+            />
+          </div>
+
+          <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
+            {filteredStudents.length > 0 ? filteredStudents.map(s => (
+              <button 
+                key={s.uid} 
+                onClick={() => handleStudentDeviceLink(s.uid)} 
+                className="w-full p-5 bg-gray-50 rounded-2xl text-left hover:bg-blue-50 transition-all border-2 border-transparent hover:border-blue-200 group flex justify-between items-center"
+              >
+                <div>
+                  <span className="block font-black text-xl text-blue-900 group-hover:text-blue-700">{s.fullName}</span>
+                  <span className="block text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">{s.grade}</span>
+                </div>
+                <ChevronRight className="text-gray-300 group-hover:text-blue-600" />
+              </button>
+            )) : (
+              <p className="text-center text-gray-400 font-bold py-8">No student found with that name.</p>
+            )}
+          </div>
+        </div>
+
+        <button 
+          onClick={() => setAppMode('roleSelection')} 
+          className="mt-12 text-blue-300 hover:text-white font-black tracking-widest uppercase text-xs flex items-center gap-2 transition-colors"
+        >
+          <LogOut size={16} /> Go Back
+        </button>
+      </div>
+    );
+  }
+
+  // ----------------------------------------
+  // APP MODE: STUDENT DASHBOARD
+  // ----------------------------------------
+  if (appMode === 'studentView' && activeStudentData) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
+        <header className="bg-blue-900 text-white p-6 md:p-10 flex justify-between items-center rounded-b-[3rem] shadow-xl relative z-20">
+          <div className="flex items-center gap-4">
+            <ShieldCheck size={48} className="text-red-500" />
+            <div>
+              <h1 className="text-3xl font-black tracking-tighter">Student Portal</h1>
+              <p className="text-blue-200 font-bold text-sm uppercase tracking-widest">{activeStudentData.fullName}</p>
+            </div>
+          </div>
+          <button 
+            onClick={handleStudentLogout} 
+            className="bg-blue-800 text-blue-100 p-4 rounded-2xl hover:bg-red-600 hover:text-white transition-all flex items-center gap-2 font-bold shadow-inner"
+          >
+             <span className="hidden sm:block">Log Out</span>
+             <LogOut size={20} />
+          </button>
+        </header>
+
+        <main className="flex-1 p-6 md:p-12 max-w-5xl mx-auto w-full space-y-10 -mt-6 relative z-10">
+          {/* Points Card */}
+          <div className="bg-white rounded-[3rem] p-10 shadow-2xl flex flex-col md:flex-row items-center justify-between gap-8 border-t-8 border-red-600">
+             <div>
+               <h2 className="text-gray-400 font-black uppercase tracking-widest mb-2 text-center md:text-left">My Reward Balance</h2>
+               <div className="text-8xl font-black text-blue-900 flex items-center justify-center md:justify-start gap-4 tracking-tighter">
+                  <Star size={72} className="text-red-600" fill="currentColor" />
+                  {activeStudentData.points || 0}
+               </div>
+             </div>
+             <div className="bg-blue-50 border border-blue-100 p-8 rounded-[2rem] text-center w-full md:w-80 shadow-inner">
+               <Award size={40} className="mx-auto text-blue-800 mb-4" />
+               <p className="font-black text-blue-900 text-lg leading-tight">Keep up the great work to earn more Eels points!</p>
+             </div>
+          </div>
+
+          {/* Student History Table */}
+          <div className="bg-white rounded-[3rem] p-10 shadow-xl border border-gray-100">
+             <h3 className="text-2xl font-black text-blue-900 mb-8 flex items-center gap-3">
+                <Clock className="text-red-500" /> My Activity History
+             </h3>
+             <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse min-w-[600px]">
+                  <thead>
+                    <tr className="border-b-2 border-gray-100 text-gray-400 uppercase tracking-widest text-xs">
+                      <th className="pb-4 font-black px-4">Date</th>
+                      <th className="pb-4 font-black px-4 text-center">Amount</th>
+                      <th className="pb-4 font-black px-4">Reason / Feedback</th>
+                      <th className="pb-4 font-black px-4">Teacher</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {myHistory.length > 0 ? myHistory.map(record => (
+                      <tr key={record.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                        <td className="py-5 px-4 font-bold text-sm text-gray-500 whitespace-nowrap">
+                          {new Date(record.createdAt).toLocaleDateString()}
+                        </td>
+                        <td className="py-5 px-4 text-center">
+                          <span className={`inline-block px-4 py-2 rounded-2xl font-black text-lg ${record.amount > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                            {record.amount > 0 ? '+' : ''}{record.amount}
+                          </span>
+                        </td>
+                        <td className="py-5 px-4 font-bold text-blue-900 max-w-xs">{record.reason}</td>
+                        <td className="py-5 px-4 font-bold text-gray-400 text-sm">{record.teacherName}</td>
+                      </tr>
+                    )) : (
+                      <tr>
+                        <td colSpan="4" className="py-16 text-center text-gray-400 font-bold italic bg-gray-50 rounded-2xl mt-4 block w-full">No points recorded yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  // Fallback for Student View if data hasn't loaded
+  if (appMode === 'studentView' && !activeStudentData) {
+    return (
+       <div className="h-screen flex flex-col items-center justify-center bg-gray-50">
+        <Loader2 className="animate-spin text-blue-800 mb-4" size={48} />
+        <h1 className="font-black text-gray-400 uppercase tracking-widest text-xs">Loading Your Profile...</h1>
+      </div>
+    )
+  }
+
+  // ----------------------------------------
+  // APP MODE: TEACHER DASHBOARD
+  // ----------------------------------------
   return (
     <div className="min-h-screen bg-gray-50 flex font-sans text-gray-900">
       {/* Sidebar Navigation */}
@@ -356,12 +585,12 @@ export default function App() {
               activeTab === 'history' ? 'bg-blue-800 text-white shadow-xl shadow-blue-200' : 'text-gray-400 hover:bg-gray-50'
             }`}
           >
-            <Clock size={24} /><span className="hidden md:block">History</span>
+            <Clock size={24} /><span className="hidden md:block">Point History</span>
           </button>
         </nav>
 
         {/* Diagnostics Status Box */}
-        <div className="mt-auto p-5 bg-gray-50 rounded-3xl border border-gray-100">
+        <div className="mt-auto p-5 bg-gray-50 rounded-3xl border border-gray-100 hidden md:block">
           <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 text-center">System Status</p>
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -380,7 +609,7 @@ export default function App() {
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-12">
           <div>
             <h2 className="text-5xl font-black tracking-tight mb-2 text-blue-900">
-              {activeTab === 'students' ? 'Student Directory' : activeTab === 'groups' ? 'Group Management' : 'Point History'}
+              {activeTab === 'students' ? 'Student Directory' : activeTab === 'groups' ? 'Group Management' : 'Transaction Log'}
             </h2>
             <div className="flex items-center gap-2 text-red-600 font-bold text-sm uppercase tracking-widest">
               <Clock size={16} /> <span>Real-time Sync Active</span>
@@ -419,15 +648,17 @@ export default function App() {
         {activeTab === 'history' ? (
           /* --- HISTORY TAB --- */
           <div className="max-w-6xl animate-in fade-in duration-300">
-            <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-gray-100">
-              <h3 className="text-2xl font-black text-blue-900 mb-6">Recent Transactions</h3>
+            <div className="bg-white p-10 rounded-[3rem] shadow-xl border border-gray-100">
+              <h3 className="text-2xl font-black text-blue-900 mb-8 flex items-center gap-3">
+                 <ShieldCheck className="text-red-500" /> Database Audit Log
+              </h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse min-w-[800px]">
                   <thead>
                     <tr className="border-b-2 border-gray-100 text-gray-400 uppercase tracking-widest text-xs">
                       <th className="pb-4 font-black px-4">Date & Time</th>
                       <th className="pb-4 font-black px-4">Student</th>
-                      <th className="pb-4 font-black px-4">Amount</th>
+                      <th className="pb-4 font-black px-4 text-center">Amount</th>
                       <th className="pb-4 font-black px-4">Reason</th>
                       <th className="pb-4 font-black px-4">Given By</th>
                     </tr>
@@ -435,19 +666,21 @@ export default function App() {
                   <tbody>
                     {history.length > 0 ? history.map(record => (
                       <tr key={record.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
-                        <td className="py-4 px-4 font-bold text-sm text-gray-500 whitespace-nowrap">
+                        <td className="py-5 px-4 font-bold text-sm text-gray-500 whitespace-nowrap">
                           {new Date(record.createdAt).toLocaleDateString()} {new Date(record.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                         </td>
-                        <td className="py-4 px-4 font-black text-blue-900">{record.studentName}</td>
-                        <td className={`py-4 px-4 font-black ${record.amount > 0 ? 'text-green-500' : 'text-red-500'}`}>
-                          {record.amount > 0 ? '+' : ''}{record.amount}
+                        <td className="py-5 px-4 font-black text-blue-900">{record.studentName}</td>
+                        <td className="py-5 px-4 text-center">
+                          <span className={`inline-block px-3 py-1 rounded-xl font-black ${record.amount > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                            {record.amount > 0 ? '+' : ''}{record.amount}
+                          </span>
                         </td>
-                        <td className="py-4 px-4 font-bold text-gray-600 max-w-xs truncate" title={record.reason}>{record.reason}</td>
-                        <td className="py-4 px-4 font-bold text-gray-400 text-sm">{record.teacherName}</td>
+                        <td className="py-5 px-4 font-bold text-gray-600 max-w-xs truncate" title={record.reason}>{record.reason}</td>
+                        <td className="py-5 px-4 font-bold text-gray-400 text-sm">{record.teacherName}</td>
                       </tr>
                     )) : (
                       <tr>
-                        <td colSpan="5" className="py-12 text-center text-gray-400 font-bold italic">No history recorded yet.</td>
+                        <td colSpan="5" className="py-16 text-center text-gray-400 font-bold italic bg-gray-50 rounded-2xl block mt-4">No history recorded yet.</td>
                       </tr>
                     )}
                   </tbody>
