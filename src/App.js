@@ -47,6 +47,64 @@ isSupported().then(yes => yes ? getAnalytics(app) : null);
 
 const GRADES = ['Pre-K', 'Kindergarten', '1st Grade', '2nd Grade', '3rd Grade', '4th Grade', '5th Grade', '6th Grade', '7th Grade', '8th Grade', '9th Grade', '10th Grade', '11th Grade', '12th Grade'];
 
+// --- Mobile-Ready Camera Scanner Component ---
+const CameraScanner = ({ onScan }) => {
+  useEffect(() => {
+    let scanner = null;
+
+    const initScanner = () => {
+      if (!window.Html5QrcodeScanner) return;
+      
+      // Initialize the scanner with settings optimized for mobile phones
+      scanner = new window.Html5QrcodeScanner(
+        "qr-reader",
+        { 
+          fps: 10, 
+          qrbox: { width: 250, height: 250 },
+          aspectRatio: 1.0,
+          supportedScanTypes: [0] // 0 = QR_CODE
+        },
+        false
+      );
+
+      scanner.render(
+        (decodedText) => {
+          if (scanner) {
+            scanner.clear(); // Stop camera instantly on successful scan
+          }
+          onScan(decodedText);
+        },
+        (err) => {
+          // Quietly ignore frame errors to prevent console spam
+        }
+      );
+    };
+
+    // Dynamically load the library to bypass build/bundler errors
+    if (!window.Html5QrcodeScanner) {
+      const script = document.createElement('script');
+      script.src = 'https://unpkg.com/html5-qrcode';
+      script.async = true;
+      script.onload = initScanner;
+      document.body.appendChild(script);
+    } else {
+      initScanner();
+    }
+
+    return () => {
+      if (scanner) {
+        scanner.clear().catch(console.error);
+      }
+    };
+  }, [onScan]);
+
+  return (
+    <div className="w-full bg-black rounded-3xl overflow-hidden shadow-inner border-4 border-gray-100 relative min-h-[300px]">
+      <div id="qr-reader" className="w-full h-full text-white !border-none"></div>
+    </div>
+  );
+};
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
@@ -499,6 +557,19 @@ export default function App() {
     setEditStudentEmail(student.email || '');
   };
 
+  // Callback when phone camera successfully scans a QR code
+  const handleCameraScan = (decodedText) => {
+    const foundStudent = students.find(s => s.uid === decodedText);
+    if (foundStudent) {
+      openStudentPanel(foundStudent);
+      setShowScanner(false);
+      showToast(`Scanned ${foundStudent.fullName}!`);
+    } else {
+      showToast("Student not found in database.");
+    }
+  };
+
+  // Callback if teacher types or uses a generic bluetooth scanner instead of the camera
   const handleScanSubmit = (e) => {
     e.preventDefault();
     const scannedId = scanData.trim();
@@ -900,7 +971,7 @@ export default function App() {
                 {customLists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
               </select>
 
-              <div className="relative flex-1 md:w-64">
+              <div className="relative flex-1 md:w-64 hidden sm:block">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-300" size={20} />
                 <input 
                   type="text" placeholder="Search..." 
@@ -911,18 +982,18 @@ export default function App() {
               
               <button 
                 onClick={() => setShowScanner(true)} 
-                className="bg-blue-800 text-white p-4 rounded-2xl shadow-xl shadow-blue-200 hover:bg-blue-900 transition-all flex items-center gap-2"
+                className="bg-blue-800 text-white p-4 rounded-2xl shadow-xl shadow-blue-200 hover:bg-blue-900 transition-all flex items-center gap-2 w-full sm:w-auto justify-center"
                 title="Scan a Student ID"
               >
-                <ScanLine size={24} /><span className="hidden sm:block font-black">Scan</span>
+                <ScanLine size={24} /><span className="font-black">Scan</span>
               </button>
 
               <button 
                 onClick={() => setShowAddStudent(true)} 
-                className="bg-red-600 text-white p-4 rounded-2xl shadow-xl shadow-red-200 hover:bg-red-700 transition-all flex items-center gap-2"
+                className="bg-red-600 text-white p-4 rounded-2xl shadow-xl shadow-red-200 hover:bg-red-700 transition-all flex items-center gap-2 hidden sm:flex"
                 title="Add a student without an account"
               >
-                <UserPlus size={24} /><span className="hidden sm:block font-black">Enroll</span>
+                <UserPlus size={24} /><span className="font-black">Enroll</span>
               </button>
             </div>
           )}
@@ -1305,6 +1376,48 @@ export default function App() {
         )}
       </main>
 
+      {/* QR Scanner Modal */}
+      {showScanner && (
+        <div className="fixed inset-0 bg-blue-900/90 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-[3rem] p-6 shadow-2xl animate-in zoom-in-95 duration-300 flex flex-col max-h-[90vh]">
+            
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-2xl font-black tracking-tight text-blue-900 flex items-center gap-2">
+                <ScanLine className="text-blue-600" /> Scanner
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => setShowScanner(false)} 
+                className="text-gray-400 hover:bg-gray-100 p-2 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            
+            {/* Live Camera Feed */}
+            <div className="flex-1 min-h-[300px] mb-4 relative">
+               <CameraScanner onScan={handleCameraScan} />
+            </div>
+
+            <div className="relative flex items-center py-2 mb-4">
+              <div className="flex-grow border-t border-gray-200"></div>
+              <span className="flex-shrink-0 mx-4 text-gray-400 text-[10px] font-black uppercase tracking-widest">Manual Input</span>
+              <div className="flex-grow border-t border-gray-200"></div>
+            </div>
+
+            <form onSubmit={handleScanSubmit}>
+              <input 
+                type="text" 
+                value={scanData} 
+                onChange={(e) => setScanData(e.target.value)} 
+                placeholder="Hardware Scanner ID..." 
+                className="w-full p-4 bg-gray-50 rounded-2xl border-2 border-transparent focus:border-blue-500 font-bold text-center text-blue-900 outline-none transition-all text-sm shadow-inner" 
+              />
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Offline Enrollment Modal */}
       {showAddStudent && (
         <div className="fixed inset-0 bg-blue-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
@@ -1351,46 +1464,6 @@ export default function App() {
                 Add to Roster
               </button>
             </div>
-          </form>
-        </div>
-      )}
-
-      {/* QR Scanner Modal */}
-      {showScanner && (
-        <div className="fixed inset-0 bg-blue-900/80 backdrop-blur-md z-[100] flex items-center justify-center p-4">
-          <form 
-            onSubmit={handleScanSubmit} 
-            className="bg-white w-full max-w-md rounded-[4rem] p-12 shadow-2xl animate-in zoom-in-95 duration-300 text-center relative"
-          >
-            <button 
-              type="button" 
-              onClick={() => setShowScanner(false)} 
-              className="absolute top-8 right-8 text-gray-300 hover:bg-gray-50 p-2 rounded-full"
-            >
-              <X size={28} />
-            </button>
-            
-            <div className="bg-blue-50 w-24 h-24 rounded-full flex items-center justify-center mx-auto mb-6">
-              <ScanLine size={48} className="text-blue-800 animate-pulse" />
-            </div>
-            
-            <h3 className="text-3xl font-black tracking-tight text-blue-900 mb-2">Ready to Scan</h3>
-            <p className="text-sm font-bold text-gray-500 mb-8">
-              Point your hardware scanner at a student's ID card or device screen.
-            </p>
-            
-            <input 
-              autoFocus
-              type="text" 
-              value={scanData} 
-              onChange={(e) => setScanData(e.target.value)} 
-              placeholder="Waiting for scanner input..." 
-              className="w-full p-6 bg-gray-50 rounded-[2rem] border-2 border-dashed border-gray-300 font-black text-center text-blue-900 outline-none focus:border-blue-500 focus:bg-white transition-all" 
-            />
-            
-            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mt-6">
-              *Scanner must be configured to press "Enter" after reading.
-            </p>
           </form>
         </div>
       )}
