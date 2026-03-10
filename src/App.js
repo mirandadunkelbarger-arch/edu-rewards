@@ -13,8 +13,9 @@ import {
   createUserWithEmailAndPassword, signOut, sendPasswordResetEmail
 } from 'firebase/auth';
 import { 
-  getFirestore, doc, setDoc, getDoc, collection, 
-  query, onSnapshot, updateDoc, increment, deleteDoc, addDoc
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  doc, setDoc, getDoc, collection, query, onSnapshot, 
+  updateDoc, increment, deleteDoc, addDoc, where, orderBy, limit
 } from 'firebase/firestore';
 
 /**
@@ -35,7 +36,12 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+
+// OPTIMIZATION: Enable Offline Persistence & Local Caching
+// This saves thousands of database reads by using the browser's local memory first.
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({tabManager: persistentMultipleTabManager()})
+});
 
 // Analytics support check
 isSupported().then(yes => yes ? getAnalytics(app) : null);
@@ -75,6 +81,7 @@ export default function App() {
   const [isEditingStudent, setIsEditingStudent] = useState(false);
   const [editStudentName, setEditStudentName] = useState('');
   const [editStudentGrade, setEditStudentGrade] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   const [showAddStudent, setShowAddStudent] = useState(false);
   const [newStudentName, setNewStudentName] = useState('');
@@ -133,25 +140,42 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Real-time Listeners (Only runs if user is logged in and profile exists)
+  // 2. Real-time Listeners (Optimized for Scale & Billing)
   useEffect(() => {
     if (!user || !profile) return;
 
-    const unsubStudents = onSnapshot(query(collection(db, 'users')), (snap) => {
-      const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
-      setStudents(data.filter(u => u.role === 'student'));
-      setPendingTeachers(data.filter(u => u.role === 'pending_teacher'));
-    });
+    let unsubStudents = () => {};
+    let unsubLists = () => {};
+    let unsubHistory = () => {};
 
-    const unsubLists = onSnapshot(query(collection(db, 'customLists')), (snap) => {
-      setCustomLists(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    if (profile.role === 'student') {
+      // STUDENTS: Only download their own history to save database reads
+      const qHistory = query(collection(db, 'pointHistory'), where('studentId', '==', profile.uid));
+      unsubHistory = onSnapshot(qHistory, (snap) => {
+        const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        setHistory(data.slice(0, 50)); // Keep only 50 most recent locally
+      });
+    } else {
+      // TEACHERS & ADMINS: Fetch roster and lists
+      unsubStudents = onSnapshot(query(collection(db, 'users')), (snap) => {
+        const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
+        setStudents(data.filter(u => u.role === 'student'));
+        if (profile.role === 'admin') {
+          setPendingTeachers(data.filter(u => u.role === 'pending_teacher'));
+        }
+      });
 
-    const unsubHistory = onSnapshot(query(collection(db, 'pointHistory')), (snap) => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      setHistory(data);
-    });
+      unsubLists = onSnapshot(query(collection(db, 'customLists')), (snap) => {
+        setCustomLists(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      });
+
+      // Limit history to 100 recent transactions globally to prevent massive downloads
+      const qHistory = query(collection(db, 'pointHistory'), orderBy('createdAt', 'desc'), limit(100));
+      unsubHistory = onSnapshot(qHistory, (snap) => {
+        setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      });
+    }
 
     return () => {
       unsubStudents();
@@ -294,6 +318,19 @@ export default function App() {
       showToast("Student profile updated!");
     } catch (e) {
       showToast("Failed to update student.");
+    }
+  };
+
+  const handleDeleteStudent = async () => {
+    if (!confirmDelete) return;
+    try {
+      await deleteDoc(doc(db, 'users', confirmDelete));
+      setSelectedStudent(null);
+      setConfirmDelete(null);
+      setIsEditingStudent(false);
+      showToast("Student profile deleted.");
+    } catch (e) {
+      showToast("Failed to delete student. Check permissions.");
     }
   };
 
@@ -1007,9 +1044,17 @@ export default function App() {
                         >
                           {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
                         </select>
-                        <div className="flex gap-2">
-                          <button onClick={handleUpdateStudent} className="flex-1 bg-blue-800 text-white py-3 rounded-xl font-black flex items-center justify-center gap-2 hover:bg-blue-900"><Save size={18}/> Save</button>
-                          <button onClick={() => setIsEditingStudent(false)} className="flex-1 bg-gray-200 text-gray-600 py-3 rounded-xl font-black hover:bg-gray-300">Cancel</button>
+                        <div className="flex flex-col gap-2">
+                          <div className="flex gap-2">
+                            <button onClick={handleUpdateStudent} className="flex-1 bg-blue-800 text-white py-3 rounded-xl font-black flex items-center justify-center gap-2 hover:bg-blue-900"><Save size={18}/> Save</button>
+                            <button onClick={() => setIsEditingStudent(false)} className="flex-1 bg-gray-200 text-gray-600 py-3 rounded-xl font-black hover:bg-gray-300">Cancel</button>
+                          </div>
+                          <button 
+                            onClick={() => setConfirmDelete(selectedStudent.uid)} 
+                            className="w-full mt-2 bg-red-50 text-red-600 py-3 rounded-xl font-black flex items-center justify-center gap-2 hover:bg-red-100 transition-colors"
+                          >
+                            <Trash2 size={18}/> Delete Student Profile
+                          </button>
                         </div>
                       </div>
                     ) : (
@@ -1151,6 +1196,33 @@ export default function App() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {confirmDelete && (
+        <div className="fixed inset-0 bg-blue-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-[3rem] p-10 shadow-2xl animate-in zoom-in-95 duration-200 text-center">
+            <div className="bg-red-100 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+              <AlertCircle size={40} className="text-red-600" />
+            </div>
+            <h3 className="text-2xl font-black text-blue-900 mb-2">Delete Student?</h3>
+            <p className="text-gray-500 font-bold mb-8">This action cannot be undone. All points and data for this student will be lost.</p>
+            <div className="flex gap-4">
+              <button 
+                onClick={() => setConfirmDelete(null)} 
+                className="flex-1 bg-gray-100 text-gray-600 py-4 rounded-2xl font-black hover:bg-gray-200 transition-all"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleDeleteStudent} 
+                className="flex-1 bg-red-600 text-white py-4 rounded-2xl font-black shadow-xl hover:bg-red-700 active:scale-95 transition-all"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
