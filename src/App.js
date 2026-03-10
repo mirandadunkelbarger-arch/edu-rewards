@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Award, Clock, Star, ShieldCheck, CheckCircle2, 
   Search, Sparkles, Loader2, Users, UserPlus, X, 
-  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, UserCheck, Mail, QrCode, ScanLine
+  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, UserCheck, Mail, QrCode, ScanLine, Printer
 } from 'lucide-react';
 
 // --- Firebase Imports ---
@@ -112,20 +112,20 @@ export default function App() {
   const [toast, setToast] = useState(null);
 
   // --- Auth Screen States ---
-  const [authView, setAuthView] = useState('login'); // 'login' | 'signup' | 'reset'
+  const [authView, setAuthView] = useState('login'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [signupName, setSignupName] = useState('');
-  const [signupRole, setSignupRole] = useState('student'); // 'student' | 'teacher'
+  const [signupRole, setSignupRole] = useState('student'); 
   const [signupGrade, setSignupGrade] = useState('6th Grade');
 
   // --- Data States ---
   const [students, setStudents] = useState([]);
-  const [pendingUsers, setPendingUsers] = useState([]); // Both pending teachers and students
+  const [pendingUsers, setPendingUsers] = useState([]); 
   const [adminInvites, setAdminInvites] = useState([]);
   const [customLists, setCustomLists] = useState([]);
   const [history, setHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState('students'); // 'students' | 'groups' | 'history' | 'admin'
+  const [activeTab, setActiveTab] = useState('students'); 
   
   // --- UI States ---
   const [selectedStudent, setSelectedStudent] = useState(null);
@@ -151,6 +151,10 @@ export default function App() {
   const [newStudentGrade, setNewStudentGrade] = useState('Pre-K');
   const [newListName, setNewListName] = useState('');
   const [newListStudentIds, setNewListStudentIds] = useState([]);
+
+  // --- Print States ---
+  const [showPrintModal, setShowPrintModal] = useState(false);
+  const [printSelection, setPrintSelection] = useState([]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -214,7 +218,6 @@ export default function App() {
     let unsubInvites = () => {};
 
     if (profile.role === 'student') {
-      // STUDENTS: Only download their own history
       const qHistory = query(collection(db, 'pointHistory'), where('studentId', '==', profile.uid));
       unsubHistory = onSnapshot(qHistory, (snap) => {
         const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -222,13 +225,11 @@ export default function App() {
         setHistory(data.slice(0, 50)); 
       });
     } else if (profile.role === 'teacher' || profile.role === 'admin') {
-      // TEACHERS & ADMINS: Fetch roster and lists
       unsubStudents = onSnapshot(query(collection(db, 'users')), (snap) => {
         const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
         setStudents(data.filter(u => u.role === 'student'));
         
         if (profile.role === 'admin') {
-          // Admins also need to see pending users
           setPendingUsers(data.filter(u => u.role === 'pending_teacher' || u.role === 'pending_student'));
         }
       });
@@ -258,7 +259,6 @@ export default function App() {
   }, [user, profile]);
 
   // --- AUTHENTICATION ACTIONS ---
-  
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -281,18 +281,14 @@ export default function App() {
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       
-      // Determine Role securely
       let finalRole = signupRole === 'teacher' ? 'pending_teacher' : 'pending_student';
       const adminEmails = ['miranda.dunkelbarger@gmail.com', 'jtselkirk85@gmail.com'];
       
-      // 1. Check hardcoded admins
-      // 2. Check if email is in the admin_invites collection
       const inviteRef = doc(db, 'admin_invites', email.toLowerCase());
       const inviteSnap = await getDoc(inviteRef);
 
       if (adminEmails.includes(email.toLowerCase()) || inviteSnap.exists()) {
         finalRole = 'admin'; 
-        // Consume/delete the invite so it can't be reused
         if (inviteSnap.exists()) {
           await deleteDoc(inviteRef);
         }
@@ -390,6 +386,33 @@ export default function App() {
     }
   };
 
+  // --- PRINT QR CODES ACTIONS ---
+  const togglePrintSelection = (uid) => {
+    setPrintSelection(prev => 
+      prev.includes(uid) ? prev.filter(id => id !== uid) : [...prev, uid]
+    );
+  };
+
+  const handleSelectAllForPrint = () => {
+    if (printSelection.length === students.length) {
+      setPrintSelection([]); // Deselect all if already all selected
+    } else {
+      setPrintSelection(students.map(s => s.uid)); // Select all
+    }
+  };
+
+  const executePrint = () => {
+    if (printSelection.length === 0) {
+      showToast("Please select at least one student to print.");
+      return;
+    }
+    setShowPrintModal(false);
+    // Slight delay to ensure modal closes before browser triggers print dialog
+    setTimeout(() => {
+      window.print();
+    }, 200);
+  };
+
   // --- TEACHER ACTIONS ---
   const handleEnrollOfflineStudent = async (e) => {
     e.preventDefault();
@@ -422,7 +445,6 @@ export default function App() {
         grade: editStudentGrade
       };
       
-      // Only admins can update the email field in Firestore
       if (profile.role === 'admin') {
         updates.email = editStudentEmail;
       }
@@ -557,7 +579,6 @@ export default function App() {
     setEditStudentEmail(student.email || '');
   };
 
-  // Callback when phone camera successfully scans a QR code
   const handleCameraScan = (decodedText) => {
     const foundStudent = students.find(s => s.uid === decodedText);
     if (foundStudent) {
@@ -569,7 +590,6 @@ export default function App() {
     }
   };
 
-  // Callback if teacher types or uses a generic bluetooth scanner instead of the camera
   const handleScanSubmit = (e) => {
     e.preventDefault();
     const scannedId = scanData.trim();
@@ -615,7 +635,6 @@ export default function App() {
   if (!user || !profile) {
     return (
       <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 font-sans relative overflow-hidden">
-        {/* Decorative Background Elements */}
         <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-red-600 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
         <div className="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-blue-500 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
 
@@ -871,7 +890,8 @@ export default function App() {
   // APP MODE: TEACHER / ADMIN DASHBOARD
   // ----------------------------------------
   return (
-    <div className="min-h-screen bg-gray-50 flex font-sans text-gray-900">
+    <>
+    <div className="min-h-screen bg-gray-50 flex font-sans text-gray-900 print:hidden">
       {/* Sidebar Navigation */}
       <aside className="w-20 md:w-72 bg-white border-r border-gray-200 flex flex-col py-10 px-6 shadow-2xl shadow-gray-200/50 z-20">
         <div className="flex items-center gap-4 mb-12 px-2">
@@ -995,6 +1015,19 @@ export default function App() {
               >
                 <UserPlus size={24} /><span className="font-black">Enroll</span>
               </button>
+
+              {profile.role === 'admin' && (
+                <button 
+                  onClick={() => {
+                    setPrintSelection(students.map(s => s.uid)); // Default to all students
+                    setShowPrintModal(true);
+                  }} 
+                  className="bg-white border-2 border-gray-200 text-gray-600 p-4 rounded-2xl shadow-sm hover:bg-gray-50 hover:text-blue-800 transition-all flex items-center gap-2"
+                  title="Print Student ID Cards"
+                >
+                  <Printer size={24} /><span className="font-black hidden lg:block">Print IDs</span>
+                </button>
+              )}
             </div>
           )}
         </header>
@@ -1376,6 +1409,70 @@ export default function App() {
         )}
       </main>
 
+      {/* Print Selection Modal */}
+      {showPrintModal && (
+        <div className="fixed inset-0 bg-blue-900/90 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-2xl rounded-[3rem] p-8 shadow-2xl animate-in zoom-in-95 duration-300 flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-2xl font-black tracking-tight text-blue-900 flex items-center gap-2">
+                <Printer className="text-blue-600" /> Print Student IDs
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => setShowPrintModal(false)} 
+                className="text-gray-400 hover:bg-gray-100 p-2 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            
+            <div className="flex justify-between items-center mb-4 px-2">
+               <p className="text-sm font-bold text-gray-500">Select which QR codes to print:</p>
+               <button 
+                 onClick={handleSelectAllForPrint}
+                 className="text-sm font-black text-blue-600 hover:text-blue-800 transition-colors"
+               >
+                 {printSelection.length === students.length ? 'Deselect All' : 'Select All'}
+               </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto bg-gray-50 rounded-2xl p-4 border border-gray-200 mb-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {students.map(s => (
+                  <label key={s.uid} className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-colors border-2 ${printSelection.includes(s.uid) ? 'bg-blue-50 border-blue-800' : 'bg-white border-transparent hover:border-gray-200'}`}>
+                    <input 
+                      type="checkbox"
+                      checked={printSelection.includes(s.uid)}
+                      onChange={() => togglePrintSelection(s.uid)}
+                      className="w-5 h-5 accent-blue-800 rounded"
+                    />
+                    <div className="truncate">
+                      <span className="block font-bold text-blue-900 truncate">{s.fullName}</span>
+                      <span className="block text-xs font-bold text-gray-400">{s.grade}</span>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-4">
+               <button 
+                 onClick={() => setShowPrintModal(false)}
+                 className="px-6 py-4 rounded-2xl font-black text-gray-600 hover:bg-gray-100 transition-colors"
+               >
+                 Cancel
+               </button>
+               <button 
+                 onClick={executePrint}
+                 className="bg-blue-800 text-white px-8 py-4 rounded-2xl font-black shadow-xl hover:bg-blue-900 transition-all flex items-center gap-2"
+               >
+                 <Printer size={20} /> Print {printSelection.length} IDs
+               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* QR Scanner Modal */}
       {showScanner && (
         <div className="fixed inset-0 bg-blue-900/90 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
@@ -1503,5 +1600,26 @@ export default function App() {
         </div>
       )}
     </div>
+
+    {/* --- PRINT-ONLY LAYOUT --- */}
+    <div className="hidden print:block p-8 bg-white text-black min-h-screen">
+      <div className="text-center mb-8">
+        <h1 className="text-4xl font-black uppercase tracking-widest border-b-4 border-black pb-4 inline-block">Eminence Eels IDs</h1>
+      </div>
+      <div className="grid grid-cols-3 gap-6">
+        {students.filter(s => printSelection.includes(s.uid)).map(s => (
+          <div key={s.uid} className="border-4 border-black p-6 flex flex-col items-center justify-center break-inside-avoid shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] bg-white h-72">
+            <h2 className="font-black text-2xl mb-1 text-center leading-tight truncate w-full">{s.fullName}</h2>
+            <p className="text-sm font-bold text-gray-600 mb-4 uppercase tracking-widest">{s.grade}</p>
+            <img 
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${s.uid}`} 
+              alt="QR Code" 
+              className="w-32 h-32"
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+    </>
   );
 }
