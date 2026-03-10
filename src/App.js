@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Award, Clock, Star, ShieldCheck, CheckCircle2, 
   Search, Sparkles, Loader2, Users, UserPlus, X, 
-  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut
+  AlertCircle, Edit2, Save, Trash2, ListFilter, LogOut, UserCheck
 } from 'lucide-react';
 
 // --- Firebase Imports ---
@@ -10,7 +10,7 @@ import { initializeApp } from 'firebase/app';
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { 
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, signOut 
+  createUserWithEmailAndPassword, signOut, sendPasswordResetEmail
 } from 'firebase/auth';
 import { 
   getFirestore, doc, setDoc, getDoc, collection, 
@@ -49,7 +49,7 @@ export default function App() {
   const [toast, setToast] = useState(null);
 
   // --- Auth Screen States ---
-  const [authView, setAuthView] = useState('login'); // 'login' | 'signup'
+  const [authView, setAuthView] = useState('login'); // 'login' | 'signup' | 'reset'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [signupName, setSignupName] = useState('');
@@ -58,9 +58,10 @@ export default function App() {
 
   // --- Data States ---
   const [students, setStudents] = useState([]);
+  const [pendingTeachers, setPendingTeachers] = useState([]);
   const [customLists, setCustomLists] = useState([]);
   const [history, setHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState('students');
+  const [activeTab, setActiveTab] = useState('students'); // 'students' | 'groups' | 'history' | 'admin'
   
   // --- Teacher UI States ---
   const [selectedStudent, setSelectedStudent] = useState(null);
@@ -95,6 +96,21 @@ export default function App() {
           const userSnap = await getDoc(doc(db, 'users', u.uid));
           if (userSnap.exists()) {
             setProfile(userSnap.data());
+          } else {
+            // Fallback profile creation if document was missed
+            let fallbackRole = 'pending_teacher';
+            if (u.email?.toLowerCase() === 'miranda.dunkelbarger@gmail.com') {
+              fallbackRole = 'admin';
+            }
+            const fallbackProfile = {
+              uid: u.uid,
+              email: u.email || '',
+              fullName: "User",
+              role: fallbackRole,
+              createdAt: new Date().toISOString()
+            };
+            await setDoc(doc(db, 'users', u.uid), fallbackProfile);
+            setProfile(fallbackProfile);
           }
         } catch (err) {
           console.error("Failed to fetch profile:", err);
@@ -115,6 +131,7 @@ export default function App() {
     const unsubStudents = onSnapshot(query(collection(db, 'users')), (snap) => {
       const data = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
       setStudents(data.filter(u => u.role === 'student'));
+      setPendingTeachers(data.filter(u => u.role === 'pending_teacher'));
     });
 
     const unsubLists = onSnapshot(query(collection(db, 'customLists')), (snap) => {
@@ -158,11 +175,19 @@ export default function App() {
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       
+      // Determine Role securely
+      let finalRole = signupRole;
+      if (email.toLowerCase() === 'miranda.dunkelbarger@gmail.com') {
+        finalRole = 'admin'; // Auto-verify the main admin
+      } else if (signupRole === 'teacher') {
+        finalRole = 'pending_teacher'; // Requires admin approval
+      }
+
       const newProfile = {
         uid: userCredential.user.uid,
         email: email,
         fullName: signupName,
-        role: signupRole,
+        role: finalRole,
         createdAt: new Date().toISOString()
       };
 
@@ -187,13 +212,48 @@ export default function App() {
     setAuthView('login');
   };
 
+  const handlePasswordReset = async (e) => {
+    e.preventDefault();
+    if (!email) {
+      showToast("Please enter your email address first.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, email);
+      showToast("Password reset link sent! Check your email.");
+      setAuthView('login');
+    } catch (err) {
+      showToast(err.message.includes('auth/user-not-found') ? "No account found with this email." : err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- ADMIN ACTIONS ---
+  const handleApproveTeacher = async (teacherId) => {
+    try {
+      await updateDoc(doc(db, 'users', teacherId), { role: 'teacher' });
+      showToast("Teacher approved!");
+    } catch (err) {
+      showToast("Failed to approve teacher. Check your Admin permissions.");
+    }
+  };
+
+  const handleRejectTeacher = async (teacherId) => {
+    try {
+      await deleteDoc(doc(db, 'users', teacherId));
+      showToast("Teacher request removed.");
+    } catch (err) {
+      showToast("Failed to remove request.");
+    }
+  };
+
   // --- TEACHER ACTIONS ---
-  
   const handleEnrollOfflineStudent = async (e) => {
     e.preventDefault();
     if (!newStudentName.trim() || !user) return;
     try {
-      // Creates an offline record for tracking
       const newRef = doc(collection(db, 'users'));
       await setDoc(newRef, {
         uid: newRef.id,
@@ -201,7 +261,7 @@ export default function App() {
         grade: newStudentGrade,
         role: 'student',
         points: 0,
-        isOffline: true, // Marker to indicate no auth account attached
+        isOffline: true, 
         createdAt: new Date().toISOString()
       });
       setNewStudentName('');
@@ -377,11 +437,17 @@ export default function App() {
 
         <div className="bg-white rounded-[3rem] p-10 w-full max-w-md shadow-2xl relative z-10">
           <h2 className="text-3xl font-black text-blue-900 mb-8 tracking-tight text-center">
-            {authView === 'login' ? 'Welcome Back' : 'Create Account'}
+            {authView === 'login' ? 'Welcome Back' : authView === 'signup' ? 'Create Account' : 'Reset Password'}
           </h2>
 
-          <form onSubmit={authView === 'login' ? handleLogin : handleSignup} className="space-y-6">
+          <form onSubmit={authView === 'login' ? handleLogin : authView === 'signup' ? handleSignup : handlePasswordReset} className="space-y-6">
             
+            {authView === 'reset' && (
+              <p className="text-sm text-gray-500 font-bold mb-4 px-2 text-center animate-in fade-in duration-300">
+                Enter your email address and we'll send you a secure link to reset your password.
+              </p>
+            )}
+
             {authView === 'signup' && (
               <div className="space-y-6 animate-in fade-in slide-in-from-top-4 duration-300">
                 <div>
@@ -436,31 +502,54 @@ export default function App() {
               />
             </div>
             
-            <div>
-              <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">Password</label>
-              <input 
-                required type="password" placeholder="••••••••" minLength={6}
-                value={password} onChange={(e) => setPassword(e.target.value)} 
-                className="w-full p-5 bg-gray-50 rounded-3xl border-none font-bold text-blue-900 shadow-inner outline-none focus:ring-4 focus:ring-blue-100" 
-              />
-            </div>
+            {authView !== 'reset' && (
+              <div className="animate-in fade-in duration-300">
+                <label className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">Password</label>
+                <input 
+                  required type="password" placeholder="••••••••" minLength={6}
+                  value={password} onChange={(e) => setPassword(e.target.value)} 
+                  className="w-full p-5 bg-gray-50 rounded-3xl border-none font-bold text-blue-900 shadow-inner outline-none focus:ring-4 focus:ring-blue-100" 
+                />
+                {authView === 'login' && (
+                  <div className="text-right mt-2 px-2">
+                    <button 
+                      type="button" 
+                      onClick={() => setAuthView('reset')} 
+                      className="text-xs font-bold text-blue-800 hover:text-blue-600 transition-colors"
+                    >
+                      Forgot Password?
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
 
             <button 
               type="submit" 
-              className="w-full bg-red-600 text-white py-5 rounded-[2rem] font-black text-lg shadow-xl shadow-red-200 hover:bg-red-700 active:scale-95 transition-all mt-4"
+              className={`w-full text-white py-5 rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all mt-4 ${authView === 'reset' ? 'bg-blue-800 hover:bg-blue-900 shadow-blue-200' : 'bg-red-600 hover:bg-red-700 shadow-red-200'}`}
             >
-              {authView === 'login' ? 'Sign In' : 'Create Account'}
+              {authView === 'login' ? 'Sign In' : authView === 'signup' ? 'Create Account' : 'Send Reset Link'}
             </button>
           </form>
 
           <div className="mt-8 text-center">
-            <button 
-              type="button"
-              onClick={() => setAuthView(authView === 'login' ? 'signup' : 'login')}
-              className="text-sm font-bold text-gray-400 hover:text-blue-800 transition-colors"
-            >
-              {authView === 'login' ? "Don't have an account? Sign Up" : "Already have an account? Log In"}
-            </button>
+            {authView === 'reset' ? (
+              <button 
+                type="button"
+                onClick={() => setAuthView('login')}
+                className="text-sm font-bold text-gray-400 hover:text-blue-800 transition-colors"
+              >
+                Back to Log In
+              </button>
+            ) : (
+              <button 
+                type="button"
+                onClick={() => setAuthView(authView === 'login' ? 'signup' : 'login')}
+                className="text-sm font-bold text-gray-400 hover:text-blue-800 transition-colors"
+              >
+                {authView === 'login' ? "Don't have an account? Sign Up" : "Already have an account? Log In"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -471,6 +560,29 @@ export default function App() {
             <span className="font-bold text-sm">{toast}</span>
           </div>
         )}
+      </div>
+    );
+  }
+
+  // ----------------------------------------
+  // PENDING TEACHER SCREEN
+  // ----------------------------------------
+  if (profile.role === 'pending_teacher') {
+    return (
+      <div className="min-h-screen bg-blue-900 flex flex-col items-center justify-center p-6 font-sans relative overflow-hidden">
+        <div className="bg-white rounded-[3rem] p-10 w-full max-w-md shadow-2xl relative z-10 text-center">
+           <Clock size={64} className="mx-auto text-blue-800 mb-6" />
+           <h2 className="text-3xl font-black text-blue-900 mb-4 tracking-tight">Approval Pending</h2>
+           <p className="text-gray-500 font-bold mb-8 leading-relaxed">
+             Your teacher account has been successfully created and is waiting for administrator approval. Please check back later.
+           </p>
+           <button 
+              onClick={handleLogout} 
+              className="w-full bg-gray-100 text-gray-600 py-4 rounded-[2rem] font-black text-lg hover:bg-gray-200 transition-all"
+           >
+              Sign Out
+           </button>
+        </div>
       </div>
     );
   }
@@ -561,7 +673,7 @@ export default function App() {
   }
 
   // ----------------------------------------
-  // APP MODE: TEACHER DASHBOARD
+  // APP MODE: TEACHER / ADMIN DASHBOARD
   // ----------------------------------------
   return (
     <div className="min-h-screen bg-gray-50 flex font-sans text-gray-900">
@@ -599,12 +711,29 @@ export default function App() {
           >
             <Clock size={24} /><span className="hidden md:block">Point History</span>
           </button>
+
+          {profile.role === 'admin' && (
+            <button 
+              onClick={() => { setActiveTab('admin'); setSelectedStudent(null); }} 
+              className={`w-full flex items-center gap-4 p-4 rounded-2xl font-bold transition-all mt-4 border-t border-gray-100 pt-6 ${
+                activeTab === 'admin' ? 'bg-red-600 text-white shadow-xl shadow-red-200' : 'text-red-500 hover:bg-red-50'
+              }`}
+            >
+              <UserCheck size={24} />
+              <span className="hidden md:block">
+                Verify Staff 
+                {pendingTeachers.length > 0 && <span className="ml-2 bg-red-100 text-red-700 px-2 py-1 rounded-full text-xs">{pendingTeachers.length}</span>}
+              </span>
+            </button>
+          )}
         </nav>
 
         {/* User Badge & Logout */}
         <div className="mt-auto hidden md:block">
           <div className="p-5 bg-blue-50 rounded-3xl border border-blue-100 text-center mb-4">
-             <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">Signed in as</p>
+             <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">
+               {profile.role === 'admin' ? 'Admin Access' : 'Signed in as'}
+             </p>
              <p className="text-sm font-black text-blue-900 truncate tracking-tight">{profile.fullName}</p>
           </div>
           <button 
@@ -626,7 +755,10 @@ export default function App() {
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-12">
           <div>
             <h2 className="text-5xl font-black tracking-tight mb-2 text-blue-900">
-              {activeTab === 'students' ? 'Student Directory' : activeTab === 'groups' ? 'Group Management' : 'Transaction Log'}
+              {activeTab === 'students' ? 'Student Directory' 
+               : activeTab === 'groups' ? 'Group Management' 
+               : activeTab === 'history' ? 'Transaction Log' 
+               : 'Staff Verification'}
             </h2>
             <div className="flex items-center gap-2 text-red-600 font-bold text-sm uppercase tracking-widest">
               <Clock size={16} /> <span>Real-time Sync Active</span>
@@ -663,7 +795,45 @@ export default function App() {
           )}
         </header>
 
-        {activeTab === 'history' ? (
+        {activeTab === 'admin' ? (
+          /* --- ADMIN TAB --- */
+          <div className="max-w-4xl animate-in fade-in duration-300">
+            <div className="bg-white p-8 rounded-[3rem] shadow-xl border border-gray-100">
+              <h3 className="text-2xl font-black text-blue-900 mb-6">Pending Approvals</h3>
+              {pendingTeachers.length > 0 ? (
+                <div className="space-y-4">
+                  {pendingTeachers.map(pt => (
+                    <div key={pt.uid} className="flex flex-col md:flex-row justify-between items-start md:items-center bg-gray-50 p-6 rounded-3xl border border-gray-100 gap-4">
+                      <div>
+                        <p className="font-black text-blue-900 text-xl">{pt.fullName}</p>
+                        <p className="text-sm font-bold text-gray-500">{pt.email}</p>
+                      </div>
+                      <div className="flex gap-3 w-full md:w-auto">
+                        <button 
+                          onClick={() => handleApproveTeacher(pt.uid)} 
+                          className="flex-1 bg-green-500 hover:bg-green-600 text-white px-6 py-3 rounded-xl font-black shadow-md transition-all"
+                        >
+                          Approve
+                        </button>
+                        <button 
+                          onClick={() => handleRejectTeacher(pt.uid)} 
+                          className="flex-1 bg-red-100 hover:bg-red-200 text-red-600 px-6 py-3 rounded-xl font-black transition-all"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                 <div className="py-16 text-center bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
+                    <CheckCircle2 size={48} className="mx-auto text-green-400 mb-4 opacity-50" />
+                    <p className="text-gray-500 font-bold text-lg">No pending teacher requests.</p>
+                 </div>
+              )}
+            </div>
+          </div>
+        ) : activeTab === 'history' ? (
           /* --- HISTORY TAB --- */
           <div className="max-w-6xl animate-in fade-in duration-300">
             <div className="bg-white p-10 rounded-[3rem] shadow-xl border border-gray-100">
@@ -784,7 +954,7 @@ export default function App() {
                       : 'bg-white border-transparent shadow-sm hover:shadow-lg'
                     }`}
                   >
-                    {!student.email && (
+                    {student.isOffline && (
                       <span className="absolute top-4 right-4 text-[10px] font-black text-gray-300 uppercase tracking-widest bg-gray-50 px-2 py-1 rounded-md">Offline Profile</span>
                     )}
                     <div className="flex justify-between items-start mb-6">
